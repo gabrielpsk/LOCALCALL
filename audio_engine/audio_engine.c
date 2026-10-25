@@ -83,7 +83,94 @@ static volatile LONG    g_running          = 0;
 static volatile LONG    g_mic_muted        = 0;
 static volatile LONG    g_deafened         = 0;
 static volatile LONG    g_loopback_enabled = 0;
+static volatile LONG    g_noise_suppression = 1; /* 1 = ligado por padrão (Discord-style) */
 static volatile DWORD   g_local_voice_ts   = 0;
+
+/* Estado do filtro passa-altas de 80 Hz (Biquad Butterworth 2ª ordem) */
+static double g_hpf_x1 = 0.0, g_hpf_x2 = 0.0;
+static double g_hpf_y1 = 0.0, g_hpf_y2 = 0.0;
+
+/* Coeficientes pré-calculados para 80 Hz @ 24000 Hz, Q = 0.7071 */
+static const double HPF_B0 =  0.98529737;
+static const double HPF_B1 = -1.97059474;
+static const double HPF_B2 =  0.98529737;
+static const double HPF_A1 = -1.97037494;
+static const double HPF_A2 =  0.97081454;
+
+/* Estado do Noise Gate Dinâmico */
+static double g_noise_floor = 80.0;
+static double g_gate_gain   = 0.0;
+static int    g_gate_hold   = 0;
+
+/* Processamento de Cancelamento de Ruído: Passa-altas 80Hz + Noise Gate adaptativo com atenuação suave */
+static void apply_noise_suppression(int16_t *pcm) {
+    if (!InterlockedCompareExchange(&g_noise_suppression, 0, 0)) {
+        return;
+    }
+
+    /* 1. Passa-altas 80 Hz: elimina chiado elétrico de 50/60 Hz, batidas na mesa e ressonâncias */
+    double x1 = g_hpf_x1, x2 = g_hpf_x2;
+    double y1 = g_hpf_y1, y2 = g_hpf_y2;
+
+    for (int i = 0; i < FRAME_SAMPLES; i++) {
+        double x0 = (double)pcm[i];
+        double y0 = HPF_B0 * x0 + HPF_B1 * x1 + HPF_B2 * x2 - HPF_A1 * y1 - HPF_A2 * y2;
+        x2 = x1; x1 = x0;
+        y2 = y1; y1 = y0;
+        pcm[i] = (int16_t)(y0 > 32767.0 ? 32767 : (y0 < -32768.0 ? -32768 : y0));
+    }
+    g_hpf_x1 = x1; g_hpf_x2 = x2;
+    g_hpf_y1 = y1; g_hpf_y2 = y2;
+
+    /* 2. Cálculo da energia do frame atual */
+    int64_t energy_sum = 0;
+    for (int i = 0; i < FRAME_SAMPLES; i++) {
+        int v = pcm[i];
+        energy_sum += (v < 0) ? -v : v;
+    }
+    double frame_energy = (double)energy_sum / (double)FRAME_SAMPLES;
+
+    /* 3. Adaptação do piso de ruído de fundo (cooler do PC, ventilador, ruído ambiente) */
+    if (frame_energy < g_noise_floor) {
+        g_noise_floor = 0.90 * g_noise_floor + 0.10 * frame_energy;
+    } else if (frame_energy < g_noise_floor * 2.5) {
+        g_noise_floor = 0.995 * g_noise_floor + 0.005 * frame_energy;
+    }
+    if (g_noise_floor < 25.0) g_noise_floor = 25.0;
+    if (g_noise_floor > 600.0) g_noise_floor = 600.0;
+
+    /* 4. Limiares de voz com histerese baseados no ruído medido */
+    double thresh_open  = g_noise_floor * 2.2;
+    if (thresh_open < 180.0) thresh_open = 180.0;
+    double thresh_close = g_noise_floor * 1.3;
+    if (thresh_close < 100.0) thresh_close = 100.0;
+
+    if (frame_energy >= thresh_open) {
+        g_gate_hold = 14; /* Mantém aberto por ~280ms (14 frames x 20ms) */
+    } else if (frame_energy < thresh_close) {
+        if (g_gate_hold > 0) g_gate_hold--;
+    }
+
+    double target_gain = (g_gate_hold > 0) ? 1.0 : 0.0;
+
+    /* 5. Interpolação suave do ganho (Attack rápido para não comer sílabas, Release suave) */
+    double gain = g_gate_gain;
+    double attack_rate  = 0.35;
+    double release_rate = 0.08;
+
+    for (int i = 0; i < FRAME_SAMPLES; i++) {
+        if (target_gain > gain) {
+            gain += (target_gain - gain) * (attack_rate / (double)FRAME_SAMPLES * 8.0);
+            if (gain > target_gain) gain = target_gain;
+        } else {
+            gain += (target_gain - gain) * (release_rate / (double)FRAME_SAMPLES * 8.0);
+            if (gain < target_gain) gain = target_gain;
+        }
+        int32_t sample = (int32_t)((double)pcm[i] * gain);
+        pcm[i] = (int16_t)(sample > 32767 ? 32767 : (sample < -32768 ? -32768 : sample));
+    }
+    g_gate_gain = gain;
+}
 
 static SOCKET             g_sock = INVALID_SOCKET;
 static struct sockaddr_in g_peers[MAX_PEERS];
@@ -312,6 +399,7 @@ static DWORD WINAPI cap_thread_proc(LPVOID param) {
             if (g_in_hdrs[i].dwFlags & WHDR_DONE) {
                 if (!InterlockedCompareExchange(&g_mic_muted, 0, 0) &&
                     !InterlockedCompareExchange(&g_deafened, 0, 0)) {
+                    apply_noise_suppression(g_in_bufs[i]);
                     if (is_frame_voiced(g_in_bufs[i])) {
                         g_local_voice_ts = GetTickCount();
                     }
@@ -685,6 +773,14 @@ EXPORT void audio_set_mic_muted(int muted) {
 
 EXPORT void audio_set_deafened(int deafened) {
     InterlockedExchange(&g_deafened, deafened ? 1 : 0);
+}
+
+EXPORT void audio_set_noise_suppression(int enabled) {
+    InterlockedExchange(&g_noise_suppression, enabled ? 1 : 0);
+}
+
+EXPORT int audio_get_noise_suppression(void) {
+    return (int)InterlockedCompareExchange(&g_noise_suppression, 0, 0);
 }
 
 EXPORT void audio_cleanup(void) {

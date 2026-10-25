@@ -4,6 +4,7 @@
  * - Preservação de Proporção (Ultrawide 21:9, 32:9, 16:9, 16:10, janelas arbitrárias) dentro do limite 720p/1080p
  * - Codificação: Windows Media Foundation H.264 MFT (Low Latency) com fallback automático para RLE rápido
  * - Transporte: UDP fragmentado cifrado com AES-256-GCM (Windows CNG)
+ * - Multi-slot Frame Assembly (4 slots) para evitar descarte por pacotes sobrepostos
  */
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
@@ -28,11 +29,12 @@
 #define MAX_PIXELS       (MAX_W * MAX_H)
 #define MAX_RAW_BYTES    (MAX_PIXELS * 4)
 #define MAX_COMP_BYTES   (MAX_RAW_BYTES + 65536)
-#define CHUNK_PAYLOAD    1340
+#define CHUNK_PAYLOAD    1180
 #define MAX_CHUNKS       ((MAX_COMP_BYTES / CHUNK_PAYLOAD) + 8)
 #define MAX_TARGETS      8
 #define MAX_STREAMS      2
-#define FRAME_TIMEOUT_MS 500
+#define NUM_FRAME_SLOTS  4
+#define FRAME_TIMEOUT_MS 600
 
 #define CODEC_RLE        0x01
 #define CODEC_H264       0x02
@@ -64,21 +66,26 @@ typedef struct {
 } MfCodec;
 
 typedef struct {
-    uint32_t sender_id;
-    uint32_t cur_frame_id;
+    uint32_t frame_id;
     uint16_t total_chunks;
     uint16_t received_chunks;
     uint16_t width;
     uint16_t height;
     uint8_t  codec;
-    DWORD    last_rx;
-    DWORD    frame_start_ts;
+    DWORD    start_ts;
+    uint32_t comp_size;
     uint8_t  chunk_mask[MAX_CHUNKS];
     uint8_t *comp_buf;
-    uint32_t comp_size;
-    uint8_t *bgra_buf;
-    uint8_t *nv12_buf;
-    MfCodec  h264_dec;
+} FrameSlot;
+
+typedef struct {
+    uint32_t   sender_id;
+    DWORD      last_rx;
+    uint32_t   last_rendered_frame_id;
+    FrameSlot  slots[NUM_FRAME_SLOTS];
+    uint8_t   *bgra_buf;
+    uint8_t   *nv12_buf;
+    MfCodec    h264_dec;
 } RxStream;
 
 static CRITICAL_SECTION g_lock;
@@ -102,9 +109,10 @@ static HANDLE        g_cap_thread = NULL;
 static FrameCallback g_callback   = NULL;
 static RxStream      g_rx_streams[MAX_STREAMS];
 
-static uint8_t *g_cap_bgra = NULL;
-static uint8_t *g_cap_nv12 = NULL;
-static uint8_t *g_cap_comp = NULL;
+static uint8_t *g_cap_bgra  = NULL;
+static uint8_t *g_cap_nv12  = NULL;
+static uint8_t *g_cap_comp  = NULL;
+static uint8_t *g_prev_bgra = NULL;
 
 static int is_known_target_ip(uint32_t ip_addr) {
     int ok = 0;
@@ -207,7 +215,7 @@ static void nv12_to_bgra(const uint8_t *nv12, uint8_t *bgra, int w, int h) {
     }
 }
 
-/* Fallback RLE rápido caso H.264 MFT não produza amostra no ciclo atual */
+/* Fallback RLE rápido */
 static uint32_t compress_rle(const uint8_t *bgra, int w, int h, int bitrate, uint8_t *out) {
     int total_pixels = w * h;
     int shift = (bitrate >= 6000000) ? 2 : 3;
@@ -314,7 +322,6 @@ static int mf_init_h264_encoder(MfCodec *c, int w, int h, int fps, int bitrate) 
     IMFActivate **activates = NULL;
     UINT32 count = 0;
 
-    /* Tenta primeiro MFT de Hardware (GPU), depois Síncrono de Sistema */
     HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
                            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
                            &in_info, &out_info, &activates, &count);
@@ -329,7 +336,6 @@ static int mf_init_h264_encoder(MfCodec *c, int w, int h, int fps, int bitrate) 
     CoTaskMemFree(activates);
     if (FAILED(hr) || !c->mft) return -2;
 
-    /* Tipo de saída: H.264 Baseline/Main Low Latency */
     IMFMediaType *out_type = NULL;
     MFCreateMediaType(&out_type);
     IMFMediaType_SetGUID(out_type, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
@@ -342,7 +348,6 @@ static int mf_init_h264_encoder(MfCodec *c, int w, int h, int fps, int bitrate) 
     IMFMediaType_Release(out_type);
     if (FAILED(hr)) { mf_close_codec(c); return -3; }
 
-    /* Tipo de entrada: NV12 */
     IMFMediaType *in_type = NULL;
     MFCreateMediaType(&in_type);
     IMFMediaType_SetGUID(in_type, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
@@ -405,7 +410,6 @@ static int mf_init_h264_decoder(MfCodec *c, int w, int h) {
     return 0;
 }
 
-/* Executa um ciclo de ProcessInput + ProcessOutput no MFT (Encoder ou Decoder) */
 static uint32_t mf_process_sample(MfCodec *c, const uint8_t *in_bytes, uint32_t in_len,
                                   LONGLONG ts_100ns, LONGLONG dur_100ns,
                                   uint8_t *out_bytes, uint32_t max_out) {
@@ -520,7 +524,8 @@ static void send_encoded_frame(uint32_t frame_id, const uint8_t *comp, uint32_t 
             sendto(g_sock, (const char *)pkt, pkt_len, 0,
                    (struct sockaddr *)&targets[t], sizeof(struct sockaddr_in));
         }
-        if ((idx & 31) == 31) {
+        /* Micro-pacing a cada 8 pacotes para evitar buffer overflow e perda UDP */
+        if ((idx & 7) == 7) {
             SwitchToThread();
         }
     }
@@ -565,7 +570,6 @@ static void capture_gdi_source(HWND hwnd, RECT mon_rc, int max_h, uint8_t *out_b
     SetStretchBltMode(hMem, HALFTONE);
 
     if (release_hwnd) {
-        /* Captura janela mesmo com aceleração de hardware se suportado, ou StretchBlt */
         HDC hFull = CreateCompatibleDC(hSrcDC);
         HBITMAP hBmpFull = CreateCompatibleBitmap(hSrcDC, src_w, src_h);
         HGDIOBJ oldFull = SelectObject(hFull, hBmpFull);
@@ -615,7 +619,6 @@ static DWORD WINAPI capture_thread_proc(LPVOID param) {
     ID3D11Texture2D        *staging = NULL;
     RECT                    mon_rc  = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
 
-    /* Se for captura de monitor (sem HWND), abre o Output DXGI correspondente ao monitor escolhido */
     if (!target_hwnd) {
         D3D_FEATURE_LEVEL fl;
         if (SUCCEEDED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
@@ -650,14 +653,10 @@ static DWORD WINAPI capture_thread_proc(LPVOID param) {
     int cur_w = 1280, cur_h = 720;
     capture_gdi_source(target_hwnd, mon_rc, max_h, g_cap_bgra, &cur_w, &cur_h);
 
-    MfCodec h264_enc;
-    memset(&h264_enc, 0, sizeof(h264_enc));
-    mf_init_h264_encoder(&h264_enc, cur_w, cur_h, fps, bitrate);
-
     LARGE_INTEGER freq, t_start, t_now;
     QueryPerformanceFrequency(&freq);
     uint32_t frame_id = 1;
-    (void)bgra_to_nv12;
+    DWORD last_keyframe_ts = 0;
 
     while (InterlockedCompareExchange(&g_running, 0, 0) &&
            InterlockedCompareExchange(&g_capturing, 0, 0)) {
@@ -706,21 +705,43 @@ static DWORD WINAPI capture_thread_proc(LPVOID param) {
             capture_gdi_source(target_hwnd, mon_rc, max_h, g_cap_bgra, &cur_w, &cur_h);
         }
 
-        /* Se a janela mudou de proporção/tamanho, reinicializa o encoder H.264 */
-        if (h264_enc.ready && (h264_enc.width != cur_w || h264_enc.height != cur_h)) {
-            mf_init_h264_encoder(&h264_enc, cur_w, cur_h, fps, bitrate);
-        }
-
         FrameCallback cb = g_callback;
         if (cb) {
             cb(0, g_cap_bgra, cur_w, cur_h, cur_w * 4);
         }
 
-        /* Codifica com RLE universal multiplataforma (compatível Windows <-> Linux sem artefatos em perda UDP) */
-        uint32_t comp_len = compress_rle(g_cap_bgra, cur_w, cur_h, bitrate, g_cap_comp);
-        uint8_t used_codec = CODEC_RLE;
+        /* Detecção rápida de tela estática para economizar banda e evitar saturação da rede */
+        DWORD now_tick = GetTickCount();
+        int is_different = 0;
+        if (!g_prev_bgra || (now_tick - last_keyframe_ts) >= 1000) {
+            is_different = 1;
+        } else {
+            const uint64_t *cur64 = (const uint64_t *)g_cap_bgra;
+            const uint64_t *prev64 = (const uint64_t *)g_prev_bgra;
+            int total_words = (cur_w * cur_h * 4) / 8;
+            int diff_count = 0;
+            for (int i = 0; i < total_words; i += 8) {
+                if (cur64[i] != prev64[i]) {
+                    diff_count++;
+                    if (diff_count > 4) {
+                        is_different = 1;
+                        break;
+                    }
+                }
+            }
+        }
 
-        send_encoded_frame(frame_id++, g_cap_comp, comp_len, cur_w, cur_h, used_codec);
+        if (is_different) {
+            if (g_prev_bgra) {
+                memcpy(g_prev_bgra, g_cap_bgra, cur_w * cur_h * 4);
+            }
+            last_keyframe_ts = now_tick;
+
+            uint32_t comp_len = compress_rle(g_cap_bgra, cur_w, cur_h, bitrate, g_cap_comp);
+            if (comp_len > 0) {
+                send_encoded_frame(frame_id++, g_cap_comp, comp_len, cur_w, cur_h, CODEC_RLE);
+            }
+        }
 
         double target_ms = 1000.0 / (double)(fps > 0 ? fps : 60);
         QueryPerformanceCounter(&t_now);
@@ -731,7 +752,6 @@ static DWORD WINAPI capture_thread_proc(LPVOID param) {
         }
     }
 
-    mf_close_codec(&h264_enc);
     if (staging) ID3D11Texture2D_Release(staging);
     if (dupl)    IDXGIOutputDuplication_Release(dupl);
     if (context) ID3D11DeviceContext_Release(context);
@@ -756,12 +776,17 @@ static int find_stream_slot(uint32_t sender_id, RxStream **out_stream) {
     }
 
     RxStream *s = &g_rx_streams[oldest_idx];
-    s->sender_id       = sender_id;
-    s->cur_frame_id    = 0;
-    s->total_chunks    = 0;
-    s->received_chunks = 0;
-    s->last_rx         = now;
-    s->frame_start_ts  = now;
+    s->sender_id              = sender_id;
+    s->last_rx                = now;
+    s->last_rendered_frame_id = 0;
+    for (int k = 0; k < NUM_FRAME_SLOTS; k++) {
+        s->slots[k].frame_id        = 0;
+        s->slots[k].received_chunks = 0;
+        s->slots[k].total_chunks    = 0;
+        s->slots[k].comp_size       = 0;
+        s->slots[k].start_ts        = now;
+        memset(s->slots[k].chunk_mask, 0, MAX_CHUNKS);
+    }
     *out_stream = s;
     return oldest_idx + 1;
 }
@@ -781,7 +806,6 @@ static DWORD WINAPI rx_thread_proc(LPVOID param) {
                          (struct sockaddr *)&from_addr, &from_len);
         int min_len = (int)(sizeof(PacketHeader) + CRYPTO_NONCE_LEN + CRYPTO_TAG_LEN);
         if (n <= min_len) continue;
-        if (!is_known_target_ip(from_addr.sin_addr.s_addr)) continue;
 
         uint32_t cipher_len = (uint32_t)(n - min_len);
         if (cipher_len == 0 || cipher_len > CHUNK_PAYLOAD) continue;
@@ -792,9 +816,19 @@ static DWORD WINAPI rx_thread_proc(LPVOID param) {
         uint8_t *tag      = cipher + cipher_len;
         uint32_t sid      = 0;
 
+        /* Abre e autentica o pacote via AES-256-GCM */
         if (crypto_open(&g_crypto, (const uint8_t *)hdr, sizeof(PacketHeader),
                         nonce, cipher, cipher_len, tag, plain_chunk, &sid) != 0 || sid == 0) {
             continue;
+        }
+
+        /* Se autenticado com sucesso e o IP ainda não constava, registra como alvo dinamicamente (NAT punch-through) */
+        if (!is_known_target_ip(from_addr.sin_addr.s_addr)) {
+            EnterCriticalSection(&g_lock);
+            if (g_num_targets < MAX_TARGETS) {
+                g_targets[g_num_targets++] = from_addr;
+            }
+            LeaveCriticalSection(&g_lock);
         }
 
         if (hdr->total_chunks == 0 || hdr->total_chunks >= MAX_CHUNKS ||
@@ -813,63 +847,73 @@ static DWORD WINAPI rx_thread_proc(LPVOID param) {
         int stream_id = find_stream_slot(sid, &s);
         s->last_rx = now;
 
-        if (hdr->frame_id != s->cur_frame_id || (now - s->frame_start_ts) > FRAME_TIMEOUT_MS) {
-            if (hdr->frame_id < s->cur_frame_id && (s->cur_frame_id - hdr->frame_id) < 1000) {
+        /* Roteia para o slot correto no ring buffer (NUM_FRAME_SLOTS = 4) */
+        int slot_idx = (int)(hdr->frame_id % NUM_FRAME_SLOTS);
+        FrameSlot *slot = &s->slots[slot_idx];
+
+        if (slot->frame_id != hdr->frame_id || (now - slot->start_ts) > FRAME_TIMEOUT_MS) {
+            /* Descarta chunk desatualizado se for de frame anterior */
+            if (hdr->frame_id < slot->frame_id && (slot->frame_id - hdr->frame_id) < 1000) {
                 continue;
             }
-            s->cur_frame_id    = hdr->frame_id;
-            s->total_chunks    = hdr->total_chunks;
-            s->received_chunks = 0;
-            s->width           = hdr->width;
-            s->height          = hdr->height;
-            s->codec           = hdr->codec;
-            s->comp_size       = 0;
-            s->frame_start_ts  = now;
-            memset(s->chunk_mask, 0, hdr->total_chunks);
+            slot->frame_id        = hdr->frame_id;
+            slot->total_chunks    = hdr->total_chunks;
+            slot->received_chunks = 0;
+            slot->width           = hdr->width;
+            slot->height          = hdr->height;
+            slot->codec           = hdr->codec;
+            slot->comp_size       = 0;
+            slot->start_ts        = now;
+            memset(slot->chunk_mask, 0, hdr->total_chunks);
         }
 
-        if (hdr->total_chunks != s->total_chunks || hdr->width != s->width || hdr->height != s->height) {
+        if (hdr->total_chunks != slot->total_chunks || hdr->width != slot->width || hdr->height != slot->height) {
             continue;
         }
 
         uint16_t idx = hdr->chunk_index;
-        if (!s->chunk_mask[idx]) {
-            memcpy(s->comp_buf + offset, plain_chunk, cipher_len);
-            s->chunk_mask[idx] = 1;
-            s->received_chunks++;
-            if (offset + cipher_len > s->comp_size) {
-                s->comp_size = offset + cipher_len;
+        if (!slot->chunk_mask[idx]) {
+            memcpy(slot->comp_buf + offset, plain_chunk, cipher_len);
+            slot->chunk_mask[idx] = 1;
+            slot->received_chunks++;
+            if (offset + cipher_len > slot->comp_size) {
+                slot->comp_size = offset + cipher_len;
             }
         }
 
-        if (s->received_chunks == s->total_chunks) {
-            int decoded_ok = 0;
-            if (s->codec == CODEC_H264) {
-                if (!s->h264_dec.ready || s->h264_dec.width != s->width || s->h264_dec.height != s->height) {
-                    mf_init_h264_decoder(&s->h264_dec, s->width, s->height);
-                }
-                if (s->h264_dec.ready) {
-                    uint32_t nv12_expected = (uint32_t)(s->width * s->height * 3 / 2);
-                    uint32_t out_nv12 = mf_process_sample(&s->h264_dec, s->comp_buf, s->comp_size,
-                                                          0, 166666, s->nv12_buf, nv12_expected);
-                    if (out_nv12 >= nv12_expected) {
-                        nv12_to_bgra(s->nv12_buf, s->bgra_buf, s->width, s->height);
+        /* Se todos os chunks do slot foram recebidos com sucesso */
+        if (slot->received_chunks == slot->total_chunks) {
+            if (slot->frame_id >= s->last_rendered_frame_id || (s->last_rendered_frame_id - slot->frame_id) > 10000) {
+                s->last_rendered_frame_id = slot->frame_id;
+                int decoded_ok = 0;
+
+                if (slot->codec == CODEC_H264) {
+                    if (!s->h264_dec.ready || s->h264_dec.width != slot->width || s->h264_dec.height != slot->height) {
+                        mf_init_h264_decoder(&s->h264_dec, slot->width, slot->height);
+                    }
+                    if (s->h264_dec.ready) {
+                        uint32_t nv12_expected = (uint32_t)(slot->width * slot->height * 3 / 2);
+                        uint32_t out_nv12 = mf_process_sample(&s->h264_dec, slot->comp_buf, slot->comp_size,
+                                                              0, 166666, s->nv12_buf, nv12_expected);
+                        if (out_nv12 >= nv12_expected) {
+                            nv12_to_bgra(s->nv12_buf, s->bgra_buf, slot->width, slot->height);
+                            decoded_ok = 1;
+                        }
+                    }
+                } else if (slot->codec == CODEC_RLE) {
+                    if (decompress_rle(slot->comp_buf, slot->comp_size, s->bgra_buf, slot->width, slot->height) == 0) {
                         decoded_ok = 1;
                     }
                 }
-            } else if (s->codec == CODEC_RLE) {
-                if (decompress_rle(s->comp_buf, s->comp_size, s->bgra_buf, s->width, s->height) == 0) {
-                    decoded_ok = 1;
-                }
-            }
 
-            if (decoded_ok) {
-                FrameCallback cb = g_callback;
-                if (cb) {
-                    cb(stream_id, s->bgra_buf, s->width, s->height, s->width * 4);
+                if (decoded_ok) {
+                    FrameCallback cb = g_callback;
+                    if (cb) {
+                        cb(stream_id, s->bgra_buf, slot->width, slot->height, slot->width * 4);
+                    }
                 }
             }
-            s->received_chunks = 0;
+            slot->received_chunks = 0;
         }
     }
 
@@ -917,14 +961,23 @@ EXPORT int video_init(int local_udp_port) {
         return -3;
     }
 
-    g_cap_bgra = (uint8_t *)malloc(MAX_RAW_BYTES);
-    g_cap_nv12 = (uint8_t *)malloc(MAX_PIXELS * 3 / 2);
-    g_cap_comp = (uint8_t *)malloc(MAX_COMP_BYTES);
+    g_cap_bgra  = (uint8_t *)malloc(MAX_RAW_BYTES);
+    g_cap_nv12  = (uint8_t *)malloc(MAX_PIXELS * 3 / 2);
+    g_cap_comp  = (uint8_t *)malloc(MAX_COMP_BYTES);
+    g_prev_bgra = (uint8_t *)malloc(MAX_RAW_BYTES);
+    if (g_prev_bgra) memset(g_prev_bgra, 0, MAX_RAW_BYTES);
+
     memset(g_rx_streams, 0, sizeof(g_rx_streams));
     for (int i = 0; i < MAX_STREAMS; i++) {
-        g_rx_streams[i].comp_buf = (uint8_t *)malloc(MAX_COMP_BYTES);
         g_rx_streams[i].bgra_buf = (uint8_t *)malloc(MAX_RAW_BYTES);
         g_rx_streams[i].nv12_buf = (uint8_t *)malloc(MAX_PIXELS * 3 / 2);
+        for (int k = 0; k < NUM_FRAME_SLOTS; k++) {
+            g_rx_streams[i].slots[k].comp_buf = (uint8_t *)malloc(MAX_COMP_BYTES);
+            memset(g_rx_streams[i].slots[k].chunk_mask, 0, MAX_CHUNKS);
+            g_rx_streams[i].slots[k].frame_id        = 0;
+            g_rx_streams[i].slots[k].received_chunks = 0;
+            g_rx_streams[i].slots[k].total_chunks    = 0;
+        }
     }
 
     InitializeCriticalSection(&g_lock);
@@ -1024,13 +1077,18 @@ EXPORT void video_cleanup(void) {
         g_rx_thread = NULL;
     }
 
-    free(g_cap_bgra); g_cap_bgra = NULL;
-    free(g_cap_nv12); g_cap_nv12 = NULL;
-    free(g_cap_comp); g_cap_comp = NULL;
+    free(g_cap_bgra);  g_cap_bgra = NULL;
+    free(g_cap_nv12);  g_cap_nv12 = NULL;
+    free(g_cap_comp);  g_cap_comp = NULL;
+    free(g_prev_bgra); g_prev_bgra = NULL;
+
     for (int i = 0; i < MAX_STREAMS; i++) {
-        free(g_rx_streams[i].comp_buf); g_rx_streams[i].comp_buf = NULL;
         free(g_rx_streams[i].bgra_buf); g_rx_streams[i].bgra_buf = NULL;
         free(g_rx_streams[i].nv12_buf); g_rx_streams[i].nv12_buf = NULL;
+        for (int k = 0; k < NUM_FRAME_SLOTS; k++) {
+            free(g_rx_streams[i].slots[k].comp_buf);
+            g_rx_streams[i].slots[k].comp_buf = NULL;
+        }
     }
 
     crypto_free_ctx(&g_crypto);

@@ -133,6 +133,11 @@ class MainWindow(QMainWindow):
         self.deafen_button = QPushButton(t("btn_deafen"))
         self.deafen_button.setCheckable(True)
         self.deafen_button.toggled.connect(self._on_deafen_toggled)
+        self.noise_button = QPushButton(t("btn_noise_on"))
+        self.noise_button.setCheckable(True)
+        self.noise_button.setChecked(True)
+        self.noise_button.setToolTip(t("tooltip_noise_suppression"))
+        self.noise_button.toggled.connect(self._on_noise_toggled)
 
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(10, 12, 10, 10)
@@ -143,6 +148,7 @@ class MainWindow(QMainWindow):
         side_layout.addWidget(self.share_button)
         side_layout.addWidget(self.mute_button)
         side_layout.addWidget(self.deafen_button)
+        side_layout.addWidget(self.noise_button)
         side_layout.addWidget(self.conn_button)
 
         self.tabs = QTabWidget()
@@ -171,6 +177,10 @@ class MainWindow(QMainWindow):
         self.audio.set_deafened(checked)
         self.deafen_button.setText(t("btn_undeafen") if checked else t("btn_deafen"))
 
+    def _on_noise_toggled(self, checked: bool):
+        self.audio.set_noise_suppression(checked)
+        self.noise_button.setText(t("btn_noise_on") if checked else t("btn_noise_off"))
+
     def retranslate_ui(self):
         """Atualiza dinamicamente todos os textos da interface após mudança de idioma."""
         self.setWindowTitle(t("room_title", name=self.last_name) if self.last_name else t("room_title_default"))
@@ -181,6 +191,8 @@ class MainWindow(QMainWindow):
         self.share_button.setText(t("btn_stop_stream") if is_me else t("btn_share_screen"))
         self.mute_button.setText(t("btn_unmute_mic") if self.mute_button.isChecked() else t("btn_mute_mic"))
         self.deafen_button.setText(t("btn_undeafen") if self.deafen_button.isChecked() else t("btn_deafen"))
+        self.noise_button.setText(t("btn_noise_on") if self.noise_button.isChecked() else t("btn_noise_off"))
+        self.noise_button.setToolTip(t("tooltip_noise_suppression"))
 
         if self.tabs.count() >= 4:
             self.tabs.setTabText(0, t("tab_screens_count", count=len(self.active_streamers)) if self.active_streamers else t("tab_screens"))

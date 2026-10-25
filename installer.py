@@ -50,45 +50,95 @@ def _get_default_install_dir() -> Path:
     return Path.home() / "LocalCall"
 
 
-def _create_desktop_shortcut(target_exe: Path, app_name: str = DEFAULT_APP_NAME) -> bool:
-    """Cria atalho (.lnk) na Área de Trabalho do Windows usando WScript.Shell nativo."""
-    desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
-    if not desktop.is_dir():
-        desktop_pt = Path.home() / "Área de Trabalho"
-        if desktop_pt.is_dir():
-            desktop = desktop_pt
-        else:
-            onedrive_dt = Path(os.environ.get("USERPROFILE", "")) / "OneDrive" / "Área de Trabalho"
-            if onedrive_dt.is_dir():
-                desktop = onedrive_dt
-            else:
-                onedrive_en = Path(os.environ.get("USERPROFILE", "")) / "OneDrive" / "Desktop"
-                if onedrive_en.is_dir():
-                    desktop = onedrive_en
-
-    shortcut_path = desktop / f"{app_name}.lnk"
-    ico_candidate = target_exe.parent / "icon.ico"
-    icon_loc = str(ico_candidate) if ico_candidate.is_file() else f"{str(target_exe)},0"
-
-    ps_script = f"""
-    $ws = New-Object -ComObject WScript.Shell
-    $s = $ws.CreateShortcut('{str(shortcut_path)}')
-    $s.TargetPath = '{str(target_exe)}'
-    $s.WorkingDirectory = '{str(target_exe.parent)}'
-    $s.IconLocation = '{icon_loc}'
-    $s.Description = 'LocalCall - P2P Voice, Video & Productivity'
-    $s.Save()
-    """
+def _get_special_folder(csidl: int) -> Path | None:
     try:
+        import ctypes
+        from ctypes import wintypes
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buf) == 0:
+            val = buf.value.strip()
+            if val:
+                return Path(val)
+    except Exception:
+        pass
+    return None
+
+
+def _create_shortcut_at(lnk_path: Path, target_exe: Path, icon_loc: str) -> bool:
+    """Cria um atalho (.lnk) usando WScript.Shell nativo via cscript."""
+    lnk_path.parent.mkdir(parents=True, exist_ok=True)
+    vbs = (
+        'Set ws = CreateObject("WScript.Shell")\r\n'
+        f'Set s = ws.CreateShortcut("{str(lnk_path)}")\r\n'
+        f's.TargetPath = "{str(target_exe)}"\r\n'
+        f's.WorkingDirectory = "{str(target_exe.parent)}"\r\n'
+        f's.IconLocation = "{icon_loc}"\r\n'
+        's.Description = "LocalCall - P2P Voice, Video & Productivity"\r\n'
+        's.Save\r\n'
+    )
+    vbs_path = lnk_path.parent / "_create_lnk.vbs"
+    try:
+        vbs_path.write_text(vbs, encoding="utf-8")
         subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            ["cscript", "//nologo", str(vbs_path)],
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
             check=True,
             timeout=5,
         )
-        return True
+        return lnk_path.is_file()
     except Exception:
         return False
+    finally:
+        if vbs_path.is_file():
+            try:
+                vbs_path.unlink()
+            except OSError:
+                pass
+
+
+def _create_all_shortcuts(target_exe: Path, app_name: str = DEFAULT_APP_NAME, desktop_requested: bool = True) -> bool:
+    """
+    Cria atalhos do LocalCall:
+    1. Sempre no Menu Iniciar (%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs)
+       para indexação instantânea na Barra de Pesquisa do Windows (Win + S).
+    2. Na Área de Trabalho (Desktop e OneDrive) se solicitado pelo usuário.
+    """
+    ico_candidate = target_exe.parent / "icon.ico"
+    icon_loc = str(ico_candidate) if ico_candidate.is_file() else f"{str(target_exe)},0"
+
+    # 1. Menu Iniciar (essencial para Win + S / Pesquisa do Windows)
+    start_menu = _get_special_folder(0x0002)  # CSIDL_PROGRAMS
+    if not start_menu or not start_menu.is_dir():
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            start_menu = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+    if start_menu and start_menu.is_dir():
+        _create_shortcut_at(start_menu / f"{app_name}.lnk", target_exe, icon_loc)
+
+    # 2. Área de Trabalho (cobre Desktop nativo, OneDrive e versões localizadas)
+    if desktop_requested:
+        desktop_targets = set()
+        shell_dt = _get_special_folder(0x0010)  # CSIDL_DESKTOPDIRECTORY
+        if shell_dt and shell_dt.is_dir():
+            desktop_targets.add(shell_dt)
+
+        userprofile = Path(os.environ.get("USERPROFILE", str(Path.home())))
+        candidates = [
+            userprofile / "OneDrive" / "Área de Trabalho",
+            userprofile / "OneDrive" / "Desktop",
+            userprofile / "Área de Trabalho",
+            userprofile / "Desktop",
+            Path.home() / "Desktop",
+            Path.home() / "Área de Trabalho",
+        ]
+        for c in candidates:
+            if c.is_dir():
+                desktop_targets.add(c)
+
+        for dt in desktop_targets:
+            _create_shortcut_at(dt / f"{app_name}.lnk", target_exe, icon_loc)
+
+    return True
 
 
 LIGHT_STYLE = """
@@ -445,22 +495,23 @@ class InstallerWindow(QDialog):
 
             self.progress_signal.emit(90, t("installer_shortcuts"))
 
-            # Cria atalho na Área de Trabalho se marcado
-            if self.shortcut_chk.isChecked():
-                _create_desktop_shortcut(dest / "LocalCall.exe")
+            # Cria atalhos no Menu Iniciar (Win + S) e Área de Trabalho
+            _create_all_shortcuts(dest / "LocalCall.exe", desktop_requested=self.shortcut_chk.isChecked())
 
-            # Cria script de desinstalação simples na pasta do app
+            # Cria script de desinstalação completo na pasta do app
             uninstaller_script = dest / "desinstalar.bat"
             uninstaller_script.write_text(
                 f"@echo off\r\n"
                 f"echo Desinstalando LocalCall...\r\n"
                 f"taskkill /F /IM LocalCall.exe >nul 2>nul\r\n"
                 f"timeout /t 1 >nul\r\n"
+                f'del /Q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\LocalCall.lnk" >nul 2>nul\r\n'
                 f'del /Q "%USERPROFILE%\\Desktop\\LocalCall.lnk" >nul 2>nul\r\n'
                 f'del /Q "%USERPROFILE%\\OneDrive\\Área de Trabalho\\LocalCall.lnk" >nul 2>nul\r\n'
+                f'del /Q "%USERPROFILE%\\OneDrive\\Desktop\\LocalCall.lnk" >nul 2>nul\r\n'
                 f'del /Q "%USERPROFILE%\\Área de Trabalho\\LocalCall.lnk" >nul 2>nul\r\n'
                 f'rd /S /Q "{str(dest)}" >nul 2>nul\r\n'
-                f"echo Desinstalacao concluida.\r\n"
+                f"echo Desinstalacao concluida com sucesso.\r\n"
                 f"pause\r\n",
                 encoding="latin-1",
             )

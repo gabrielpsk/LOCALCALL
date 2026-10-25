@@ -30,6 +30,7 @@ ENV/
 *.rpm
 *.AppImage
 *.pkg
+*.spec
 Instalador_LocalCall.exe
 
 # Local configs and databases

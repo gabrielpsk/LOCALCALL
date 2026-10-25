@@ -29,6 +29,7 @@ class AudioBridge:
         self.mic_muted = False
         self.deafened = False
         self.loopback_enabled = False
+        self.noise_suppression = True
         # Controles individuais por participante (chave: nome do usuário)
         self.peer_volumes: dict[str, int] = {}
         self.peer_muted: set[str] = set()
@@ -78,6 +79,10 @@ class AudioBridge:
                     dll.audio_set_peer_loopback_muted.argtypes = [ctypes.c_uint, ctypes.c_int]
                     dll.audio_set_peer_loopback_muted.restype = None
 
+                if hasattr(dll, "audio_set_noise_suppression"):
+                    dll.audio_set_noise_suppression.argtypes = [ctypes.c_int]
+                    dll.audio_set_noise_suppression.restype = None
+
                 dll.audio_cleanup.argtypes = []
                 dll.audio_cleanup.restype = None
 
@@ -101,6 +106,8 @@ class AudioBridge:
                 self.active_port = port
                 self._dll.audio_set_mic_muted(1 if self.mic_muted else 0)
                 self._dll.audio_set_deafened(1 if self.deafened else 0)
+                if hasattr(self._dll, "audio_set_noise_suppression"):
+                    self._dll.audio_set_noise_suppression(1 if self.noise_suppression else 0)
                 if hasattr(self._dll, "audio_set_loopback"):
                     self._dll.audio_set_loopback(1 if self.loopback_enabled else 0)
                 return True, f"Voz UDP cifrada (porta {port})"
@@ -195,6 +202,11 @@ class AudioBridge:
         self.deafened = bool(deafened)
         if self._dll:
             self._dll.audio_set_deafened(1 if self.deafened else 0)
+
+    def set_noise_suppression(self, enabled: bool):
+        self.noise_suppression = bool(enabled)
+        if self._dll and hasattr(self._dll, "audio_set_noise_suppression"):
+            self._dll.audio_set_noise_suppression(1 if self.noise_suppression else 0)
 
     def set_loopback(self, enabled: bool):
         self.loopback_enabled = bool(enabled)

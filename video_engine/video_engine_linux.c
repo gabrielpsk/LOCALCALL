@@ -37,11 +37,12 @@
 #define MAX_PIXELS       (MAX_W * MAX_H)
 #define MAX_RAW_BYTES    (MAX_PIXELS * 4)
 #define MAX_COMP_BYTES   (MAX_RAW_BYTES + 65536)
-#define CHUNK_PAYLOAD    1340
+#define CHUNK_PAYLOAD    1180
 #define MAX_CHUNKS       ((MAX_COMP_BYTES / CHUNK_PAYLOAD) + 8)
 #define MAX_TARGETS      8
 #define MAX_STREAMS      2
-#define FRAME_TIMEOUT_MS 500
+#define NUM_FRAME_SLOTS  4
+#define FRAME_TIMEOUT_MS 600
 
 #define CODEC_RLE        0x01
 #define CODEC_H264       0x02
@@ -61,19 +62,24 @@ typedef struct {
 typedef void (*FrameCallback)(int stream_id, const unsigned char *data, int width, int height, int stride);
 
 typedef struct {
-    uint32_t sender_id;
-    uint32_t cur_frame_id;
+    uint32_t frame_id;
     uint16_t total_chunks;
     uint16_t received_chunks;
     uint16_t width;
     uint16_t height;
     uint8_t  codec;
-    uint64_t last_rx;
-    uint64_t frame_start_ts;
+    uint64_t start_ts;
+    uint32_t comp_size;
     uint8_t  chunk_mask[MAX_CHUNKS];
     uint8_t *comp_buf;
-    uint32_t comp_size;
-    uint8_t *bgra_buf;
+} FrameSlot;
+
+typedef struct {
+    uint32_t   sender_id;
+    uint64_t   last_rx;
+    uint32_t   last_rendered_frame_id;
+    FrameSlot  slots[NUM_FRAME_SLOTS];
+    uint8_t   *bgra_buf;
 } RxStream;
 
 typedef struct {
@@ -546,12 +552,17 @@ static int find_stream_slot(uint32_t sender_id, RxStream **out_stream) {
     }
 
     RxStream *s = &g_rx_streams[oldest_idx];
-    s->sender_id       = sender_id;
-    s->cur_frame_id    = 0;
-    s->total_chunks    = 0;
-    s->received_chunks = 0;
-    s->last_rx         = now;
-    s->frame_start_ts  = now;
+    s->sender_id              = sender_id;
+    s->last_rx                = now;
+    s->last_rendered_frame_id = 0;
+    for (int k = 0; k < NUM_FRAME_SLOTS; k++) {
+        s->slots[k].frame_id        = 0;
+        s->slots[k].received_chunks = 0;
+        s->slots[k].total_chunks    = 0;
+        s->slots[k].comp_size       = 0;
+        s->slots[k].start_ts        = now;
+        memset(s->slots[k].chunk_mask, 0, MAX_CHUNKS);
+    }
     *out_stream = s;
     return oldest_idx + 1;
 }
@@ -569,7 +580,6 @@ static void *rx_thread_proc(void *param) {
                              (struct sockaddr *)&from_addr, &from_len);
         ssize_t min_len = (ssize_t)(sizeof(PacketHeader) + CRYPTO_NONCE_LEN + CRYPTO_TAG_LEN);
         if (n <= min_len) continue;
-        if (!is_known_target_ip(from_addr.sin_addr.s_addr)) continue;
 
         uint32_t cipher_len = (uint32_t)(n - min_len);
         if (cipher_len == 0 || cipher_len > CHUNK_PAYLOAD) continue;
@@ -583,6 +593,14 @@ static void *rx_thread_proc(void *param) {
         if (crypto_open(&g_crypto, (const uint8_t *)hdr, sizeof(PacketHeader),
                         nonce, cipher, cipher_len, tag, plain_chunk, &sid) != 0 || sid == 0) {
             continue;
+        }
+
+        if (!is_known_target_ip(from_addr.sin_addr.s_addr)) {
+            pthread_mutex_lock(&g_lock);
+            if (g_num_targets < MAX_TARGETS) {
+                g_targets[g_num_targets++] = from_addr;
+            }
+            pthread_mutex_unlock(&g_lock);
         }
 
         if (hdr->total_chunks == 0 || hdr->total_chunks >= MAX_CHUNKS ||
@@ -601,50 +619,56 @@ static void *rx_thread_proc(void *param) {
         int stream_id = find_stream_slot(sid, &s);
         s->last_rx = now;
 
-        if (hdr->frame_id != s->cur_frame_id || (now - s->frame_start_ts) > FRAME_TIMEOUT_MS) {
-            if (hdr->frame_id < s->cur_frame_id && (s->cur_frame_id - hdr->frame_id) < 1000) {
+        int slot_idx = (int)(hdr->frame_id % NUM_FRAME_SLOTS);
+        FrameSlot *slot = &s->slots[slot_idx];
+
+        if (slot->frame_id != hdr->frame_id || (now - slot->start_ts) > FRAME_TIMEOUT_MS) {
+            if (hdr->frame_id < slot->frame_id && (slot->frame_id - hdr->frame_id) < 1000) {
                 continue;
             }
-            s->cur_frame_id    = hdr->frame_id;
-            s->total_chunks    = hdr->total_chunks;
-            s->received_chunks = 0;
-            s->width           = hdr->width;
-            s->height          = hdr->height;
-            s->codec           = hdr->codec;
-            s->comp_size       = 0;
-            s->frame_start_ts  = now;
-            memset(s->chunk_mask, 0, hdr->total_chunks);
+            slot->frame_id        = hdr->frame_id;
+            slot->total_chunks    = hdr->total_chunks;
+            slot->received_chunks = 0;
+            slot->width           = hdr->width;
+            slot->height          = hdr->height;
+            slot->codec           = hdr->codec;
+            slot->comp_size       = 0;
+            slot->start_ts        = now;
+            memset(slot->chunk_mask, 0, hdr->total_chunks);
         }
 
-        if (hdr->total_chunks != s->total_chunks || hdr->width != s->width || hdr->height != s->height) {
+        if (hdr->total_chunks != slot->total_chunks || hdr->width != slot->width || hdr->height != slot->height) {
             continue;
         }
 
         uint16_t idx = hdr->chunk_index;
-        if (!s->chunk_mask[idx]) {
-            memcpy(s->comp_buf + offset, plain_chunk, cipher_len);
-            s->chunk_mask[idx] = 1;
-            s->received_chunks++;
-            if (offset + cipher_len > s->comp_size) {
-                s->comp_size = offset + cipher_len;
+        if (!slot->chunk_mask[idx]) {
+            memcpy(slot->comp_buf + offset, plain_chunk, cipher_len);
+            slot->chunk_mask[idx] = 1;
+            slot->received_chunks++;
+            if (offset + cipher_len > slot->comp_size) {
+                slot->comp_size = offset + cipher_len;
             }
         }
 
-        if (s->received_chunks == s->total_chunks) {
-            int decoded_ok = 0;
-            if (s->codec == CODEC_RLE) {
-                if (decompress_rle(s->comp_buf, s->comp_size, s->bgra_buf, s->width, s->height) == 0) {
-                    decoded_ok = 1;
+        if (slot->received_chunks == slot->total_chunks) {
+            if (slot->frame_id >= s->last_rendered_frame_id || (s->last_rendered_frame_id - slot->frame_id) > 10000) {
+                s->last_rendered_frame_id = slot->frame_id;
+                int decoded_ok = 0;
+                if (slot->codec == CODEC_RLE) {
+                    if (decompress_rle(slot->comp_buf, slot->comp_size, s->bgra_buf, slot->width, slot->height) == 0) {
+                        decoded_ok = 1;
+                    }
                 }
-            }
 
-            if (decoded_ok) {
-                FrameCallback cb = g_callback;
-                if (cb) {
-                    cb(stream_id, s->bgra_buf, s->width, s->height, s->width * 4);
+                if (decoded_ok) {
+                    FrameCallback cb = g_callback;
+                    if (cb) {
+                        cb(stream_id, s->bgra_buf, slot->width, slot->height, slot->width * 4);
+                    }
                 }
             }
-            s->received_chunks = 0;
+            slot->received_chunks = 0;
         }
     }
     return NULL;
@@ -695,8 +719,14 @@ EXPORT int video_init(int local_udp_port) {
 
     memset(g_rx_streams, 0, sizeof(g_rx_streams));
     for (int i = 0; i < MAX_STREAMS; i++) {
-        g_rx_streams[i].comp_buf = (uint8_t *)malloc(MAX_COMP_BYTES);
         g_rx_streams[i].bgra_buf = (uint8_t *)malloc(MAX_RAW_BYTES);
+        for (int k = 0; k < NUM_FRAME_SLOTS; k++) {
+            g_rx_streams[i].slots[k].comp_buf = (uint8_t *)malloc(MAX_COMP_BYTES);
+            memset(g_rx_streams[i].slots[k].chunk_mask, 0, MAX_CHUNKS);
+            g_rx_streams[i].slots[k].frame_id        = 0;
+            g_rx_streams[i].slots[k].received_chunks = 0;
+            g_rx_streams[i].slots[k].total_chunks    = 0;
+        }
     }
 
     pthread_mutex_init(&g_lock, NULL);
@@ -798,8 +828,11 @@ EXPORT void video_cleanup(void) {
     free(g_cap_bgra); g_cap_bgra = NULL;
     free(g_cap_comp); g_cap_comp = NULL;
     for (int i = 0; i < MAX_STREAMS; i++) {
-        free(g_rx_streams[i].comp_buf); g_rx_streams[i].comp_buf = NULL;
         free(g_rx_streams[i].bgra_buf); g_rx_streams[i].bgra_buf = NULL;
+        for (int k = 0; k < NUM_FRAME_SLOTS; k++) {
+            free(g_rx_streams[i].slots[k].comp_buf);
+            g_rx_streams[i].slots[k].comp_buf = NULL;
+        }
     }
 
     crypto_free_ctx(&g_crypto);

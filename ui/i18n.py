@@ -49,6 +49,9 @@ TRANSLATIONS = {
         "btn_unmute_mic": "Mic Mutado",
         "btn_deafen": "Desativar Áudio",
         "btn_undeafen": "Áudio Desativado",
+        "btn_noise_on": "Ruído: Ativo",
+        "btn_noise_off": "Ruído: Desativado",
+        "tooltip_noise_suppression": "Cancelamento de Ruído inteligente (estilo Discord) - elimina chiado, ventilador e ruídos de fundo",
         # Menu de Contexto de Participantes (Estilo Discord)
         "ctx_mute_peer": "Mutar para Mim",
         "ctx_user_volume": "Volume do Usuário: {pct}%",
@@ -193,6 +196,9 @@ TRANSLATIONS = {
         "btn_unmute_mic": "Mic Muted",
         "btn_deafen": "Deafen",
         "btn_undeafen": "Deafened",
+        "btn_noise_on": "Noise: On",
+        "btn_noise_off": "Noise: Off",
+        "tooltip_noise_suppression": "Smart Noise Suppression (Discord-style) - eliminates hiss, fan noise, and background rumble",
         # Participant Context Menu (Discord-style)
         "ctx_mute_peer": "Mute for Me",
         "ctx_user_volume": "User Volume: {pct}%",
@@ -337,6 +343,9 @@ TRANSLATIONS = {
         "btn_unmute_mic": "Mic Silenciado",
         "btn_deafen": "Desactivar Audio",
         "btn_undeafen": "Audio Desactivado",
+        "btn_noise_on": "Ruido: Activo",
+        "btn_noise_off": "Ruido: Desactivado",
+        "tooltip_noise_suppression": "Cancelación de Ruido inteligente (estilo Discord) - elimina siseo, ventiladores y ruido de fondo",
         # Menú Contextual de Participantes (Estilo Discord)
         "ctx_mute_peer": "Silenciar para Mí",
         "ctx_user_volume": "Volumen del Usuario: {pct}%",
