@@ -475,6 +475,8 @@ static void send_encoded_frame(uint32_t frame_id, const uint8_t *comp, uint32_t 
     pthread_mutex_unlock(&g_lock);
     if (n_targets == 0) return;
 
+    int is_large_burst = (total_chunks > 32);
+
     for (uint16_t idx = 0; idx < total_chunks; idx++) {
         uint32_t offset = (uint32_t)idx * CHUNK_PAYLOAD;
         uint32_t sz = comp_len - offset;
@@ -494,6 +496,11 @@ static void send_encoded_frame(uint32_t frame_id, const uint8_t *comp, uint32_t 
         for (int t = 0; t < n_targets; t++) {
             sendto(g_sock, pkt, pkt_len, MSG_NOSIGNAL,
                    (struct sockaddr *)&targets[t], sizeof(struct sockaddr_in));
+        }
+
+        /* Micro-pacing suave apenas para keyframes grandes: evita perda de pacotes UDP na placa de rede */
+        if (is_large_burst && (idx & 0x0F) == 0x0F) {
+            usleep(800);
         }
     }
 }
@@ -585,7 +592,9 @@ static void *capture_thread_proc(void *param) {
 
             uint64_t now_tick = get_tick_ms();
             static uint64_t last_keyframe_ts = 0;
-            int is_keyframe = (!g_prev_bgra || (now_tick - last_keyframe_ts) >= 2000 || frame_id == 1);
+            static int s_prev_w = 0, s_prev_h = 0;
+            int is_keyframe = (!g_prev_bgra || cur_w != s_prev_w || cur_h != s_prev_h ||
+                               (now_tick - last_keyframe_ts) >= 2000 || frame_id == 1);
 
             uint32_t comp_len = encode_tile_frame(
                 (const uint32_t *)g_cap_bgra,
@@ -594,7 +603,11 @@ static void *capture_thread_proc(void *param) {
             );
 
             if (comp_len > 0) {
-                if (is_keyframe) last_keyframe_ts = now_tick;
+                if (is_keyframe) {
+                    last_keyframe_ts = now_tick;
+                    s_prev_w = cur_w;
+                    s_prev_h = cur_h;
+                }
                 if (g_prev_bgra) {
                     memcpy(g_prev_bgra, g_cap_bgra, (size_t)cur_w * (size_t)cur_h * 4);
                 }
@@ -631,6 +644,7 @@ static int find_stream_slot(uint32_t sender_id, RxStream **out_stream) {
     s->sender_id              = sender_id;
     s->last_rx                = now;
     s->last_rendered_frame_id = 0;
+    if (s->bgra_buf) memset(s->bgra_buf, 0, MAX_RAW_BYTES);
     for (int k = 0; k < NUM_FRAME_SLOTS; k++) {
         s->slots[k].frame_id        = 0;
         s->slots[k].received_chunks = 0;

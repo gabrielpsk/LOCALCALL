@@ -99,7 +99,9 @@ class VideoBridge(QObject):
                 self._dll = None
 
     def _on_c_frame(self, stream_id: int, data_ptr, width: int, height: int, stride: int):
-        if not data_ptr or width <= 0 or height <= 0:
+        # Ignora stream_id == 0 (quadros locais capturados da própria máquina) para evitar
+        # processamento desnecessário e o efeito espelho infinito (túnel recursivo).
+        if not data_ptr or width <= 0 or height <= 0 or stream_id == 0:
             return
         try:
             byte_count = height * stride

@@ -121,6 +121,9 @@ TRANSLATIONS = {
         "waiting_video": "Aguardando vídeo de {title}...",
         "fullscreen_hint": "  •  ESC ou duplo clique para sair da tela cheia",
         "window_fullscreen_hint": "  •  Duplo clique para tela cheia",
+        "local_presenter_title": "Você está apresentando sua tela",
+        "local_presenter_desc": "Sua transmissão está visível em tempo real para os outros participantes da chamada.\nO LocalCall foi ocultado da transmissão para proteger sua privacidade e eliminar o efeito espelho.",
+        "local_presenter_badge": "● Transmissão Ativa • 60 FPS • E2EE",
         # Chat
         "chat_placeholder": "Mensagem",
         "btn_image": "Imagem",
@@ -268,6 +271,9 @@ TRANSLATIONS = {
         "waiting_video": "Waiting for video from {title}...",
         "fullscreen_hint": "  •  ESC or double-click to exit fullscreen",
         "window_fullscreen_hint": "  •  Double-click for fullscreen",
+        "local_presenter_title": "You are sharing your screen",
+        "local_presenter_desc": "Your screen is being shared in real-time with other participants.\nLocalCall is automatically hidden from capture to protect your privacy and eliminate the mirror effect.",
+        "local_presenter_badge": "● Streaming Active • 60 FPS • E2EE",
         # Chat
         "chat_placeholder": "Message",
         "btn_image": "Image",
@@ -415,6 +421,9 @@ TRANSLATIONS = {
         "waiting_video": "Esperando vídeo de {title}...",
         "fullscreen_hint": "  •  ESC o doble clic para salir de pantalla completa",
         "window_fullscreen_hint": "  •  Doble clic para pantalla completa",
+        "local_presenter_title": "Estás compartiendo tu pantalla",
+        "local_presenter_desc": "Tu pantalla se está transmitiendo en tiempo real a los demás participantes.\nLocalCall se oculta automáticamente de la captura para proteger tu privacidad y evitar el efecto espejo.",
+        "local_presenter_badge": "● Transmisión Activa • 60 FPS • E2EE",
         # Chat
         "chat_placeholder": "Mensaje",
         "btn_image": "Imagen",

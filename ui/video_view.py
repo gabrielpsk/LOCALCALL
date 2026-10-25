@@ -184,6 +184,76 @@ class PeerCard(QFrame):
         self.initial.style().polish(self.initial)
 
 
+class LocalPresenterCard(QFrame):
+    """Card exibido quando o usuário local está transmitindo sua tela.
+    Evita o efeito espelho infinito (túnel recursivo) e fornece controle direto."""
+
+    def __init__(self, on_stop_stream):
+        super().__init__()
+        self.setObjectName("localPresenterCard")
+        self.setStyleSheet("""
+            #localPresenterCard {
+                background-color: #18181b;
+                border: 2px dashed #3b82f6;
+                border-radius: 12px;
+            }
+        """)
+        lay = QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.setSpacing(14)
+        lay.setContentsMargins(32, 32, 32, 32)
+
+        icon_lbl = QLabel("🖥️")
+        icon_lbl.setStyleSheet("font-size: 52px; background: transparent;")
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title_lbl = QLabel(t("local_presenter_title"))
+        title_lbl.setStyleSheet("font-size: 18px; font-weight: bold; color: #f4f4f5; background: transparent;")
+        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        desc_lbl = QLabel(t("local_presenter_desc"))
+        desc_lbl.setStyleSheet("font-size: 13px; color: #a1a1aa; background: transparent;")
+        desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc_lbl.setWordWrap(True)
+
+        badge_lbl = QLabel(t("local_presenter_badge"))
+        badge_lbl.setStyleSheet("""
+            font-size: 12px;
+            font-weight: 600;
+            color: #10b981;
+            background-color: rgba(16, 185, 129, 0.12);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            padding: 5px 14px;
+            border-radius: 6px;
+        """)
+        badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        stop_btn = QPushButton(t("btn_stop_stream"))
+        stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ef4444;
+                color: #ffffff;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 10px 28px;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #dc2626;
+            }
+        """)
+        stop_btn.clicked.connect(on_stop_stream)
+
+        lay.addWidget(icon_lbl)
+        lay.addWidget(title_lbl)
+        lay.addWidget(desc_lbl)
+        lay.addSpacing(4)
+        lay.addWidget(badge_lbl, 0, Qt.AlignmentFlag.AlignCenter)
+        lay.addSpacing(8)
+        lay.addWidget(stop_btn, 0, Qt.AlignmentFlag.AlignCenter)
+
+
 class VideoStage(QWidget):
     """
     Grade adaptativa de telas:
@@ -277,10 +347,8 @@ class VideoStage(QWidget):
 
     def push_frame(self, stream_id: int, img: QImage):
         """Direciona o frame recebido para a superfície correspondente."""
-        if not self.streamers:
-            return
-        if stream_id == 0 and self.local_name in self.surfaces:
-            self.surfaces[self.local_name].set_frame(img)
+        # Ignora stream_id == 0 (stream local) para evitar desenhar a tela dentro da própria tela
+        if stream_id == 0 or not self.streamers:
             return
 
         remote_names = [n for n in self.streamers if n != self.local_name]
@@ -306,6 +374,8 @@ class VideoStage(QWidget):
     def _rebuild_grid(self):
         self._clear_grid()
         n_streams = len(self.streamers)
+        remote_streamers = [n for n in self.streamers if n != self.local_name]
+        is_local_streaming = bool(self.local_name and self.local_name in self.streamers)
 
         if n_streams == 0:
             names = self.peers if self.peers else ([self.local_name] if self.local_name else [])
@@ -319,8 +389,34 @@ class VideoStage(QWidget):
                 )
                 self.peer_cards[name] = card
                 self.grid.addWidget(card, r, c)
-        elif n_streams == 1:
-            name = self.streamers[0]
+        elif not remote_streamers:
+            # Apenas o usuário local está transmitindo sua tela
+            card = LocalPresenterCard(self.on_toggle_stream)
+            self.grid.addWidget(card, 0, 0)
+        elif not is_local_streaming:
+            # Apenas usuários remotos estão transmitindo
+            if len(remote_streamers) == 1:
+                name = remote_streamers[0]
+                surf = VideoSurface(
+                    f"{name} (Ao vivo)",
+                    peer_name=name,
+                    on_context_menu=self.on_peer_context_menu,
+                )
+                self.surfaces[name] = surf
+                self.grid.addWidget(surf, 0, 0)
+            else:
+                for idx, name in enumerate(remote_streamers[:2]):
+                    surf = VideoSurface(
+                        f"{name} (Ao vivo)",
+                        peer_name=name,
+                        on_context_menu=self.on_peer_context_menu,
+                    )
+                    self.surfaces[name] = surf
+                    self.grid.addWidget(surf, 0, idx)
+        else:
+            # Usuário local E usuário remoto transmitindo:
+            # A transmissão remota recebe o destaque principal e o card local fica ao lado
+            name = remote_streamers[0]
             surf = VideoSurface(
                 f"{name} (Ao vivo)",
                 peer_name=name,
@@ -328,12 +424,5 @@ class VideoStage(QWidget):
             )
             self.surfaces[name] = surf
             self.grid.addWidget(surf, 0, 0)
-        else:
-            for idx, name in enumerate(self.streamers[:2]):
-                surf = VideoSurface(
-                    f"{name} (Ao vivo)",
-                    peer_name=name,
-                    on_context_menu=self.on_peer_context_menu,
-                )
-                self.surfaces[name] = surf
-                self.grid.addWidget(surf, 0, idx)
+            card = LocalPresenterCard(self.on_toggle_stream)
+            self.grid.addWidget(card, 0, 1)

@@ -261,6 +261,8 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(0)
 
     def _on_video_frame(self, stream_id: int, img):
+        if stream_id == 0:
+            return
         if hasattr(self, "video_stage"):
             self.video_stage.push_frame(stream_id, img)
 
@@ -591,6 +593,23 @@ class MainWindow(QMainWindow):
             self.tasks.refresh()
         elif t.startswith("note"):
             self.notes.refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_capture_exclusion()
+
+    def _apply_capture_exclusion(self):
+        """Oculta a janela do LocalCall de capturas de tela no Windows (WDA_EXCLUDEFROMCAPTURE).
+        Isso impede o efeito espelho infinito (túnel recursivo) e protege privacidade."""
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                hwnd = int(self.winId())
+                if hwnd:
+                    # 0x00000011 = WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+ e Windows 11)
+                    ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
+            except Exception:
+                pass
 
     def closeEvent(self, event):
         self._vad_timer.stop()
