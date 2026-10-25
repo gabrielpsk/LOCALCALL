@@ -64,7 +64,14 @@ class ClientSession(QObject):
         return True
 
     def stop(self):
-        self._sock.disconnectFromHost()
+        try:
+            self._sock.readyRead.disconnect()
+            self._sock.disconnected.disconnect()
+            self._sock.connected.disconnect()
+            self._sock.errorOccurred.disconnect()
+        except Exception:
+            pass
+        self._sock.abort()
 
     def send(self, req: dict) -> bool:
         if (

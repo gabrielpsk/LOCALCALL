@@ -23,9 +23,13 @@ RATE_LIMIT_PER_SEC = 25
 
 
 def _clean_ip(addr: QHostAddress) -> str:
-    ip4 = addr.toIPv4Address()
-    if ip4:
-        return QHostAddress(ip4).toString()
+    res = addr.toIPv4Address()
+    if isinstance(res, tuple):
+        val, ok = res
+        if ok:
+            return QHostAddress(val).toString()
+    elif isinstance(res, int) and res:
+        return QHostAddress(res).toString()
     s = addr.toString()
     return s[7:] if s.startswith("::ffff:") else s
 
@@ -91,11 +95,26 @@ class HostSession(QObject):
         return True
 
     def stop(self):
-        for sock in list(self._pending):
-            sock.abort()
-        for sock in list(self._peers):
-            sock.disconnectFromHost()
         self._server.close()
+        for sock in list(self._pending):
+            try:
+                sock.readyRead.disconnect()
+                sock.disconnected.disconnect()
+            except Exception:
+                pass
+            sock.abort()
+            sock.deleteLater()
+        self._pending.clear()
+
+        for sock in list(self._peers):
+            try:
+                sock.readyRead.disconnect()
+                sock.disconnected.disconnect()
+            except Exception:
+                pass
+            sock.abort()
+            sock.deleteLater()
+        self._peers.clear()
 
     def peers(self):
         return [self.name] + [info["name"] for info in self._peers.values()]
