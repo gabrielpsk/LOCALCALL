@@ -1,11 +1,16 @@
-# 🚀 LAN Call & Focus
+# 🚀 LocalCall — P2P Voice Call & 60 FPS Screen Share
 
 > **Chamadas de voz ultrarrápidas, streaming de tela a 60 FPS e ferramentas de produtividade para você e seus amigos.**  
-> Sem servidores corporativos no meio do caminho, sem telemetria chata, sem comer metade da sua memória RAM. Direto na rede local ou via VPN virtual (Radmin / ZeroTier).
+> Sem servidores corporativos no meio do caminho, sem telemetria, sem comer metade da sua memória RAM. Direto na rede local ou via VPN virtual (Radmin VPN / ZeroTier).
 
+🌐 **Site Oficial e Downloads:** [https://localcall.netlify.app/](https://localcall.netlify.app/)  
+📖 **Guia de Conexão Radmin VPN:** [https://localcall.netlify.app/tutorial-windows.html](https://localcall.netlify.app/tutorial-windows.html)  
+🐧 **Guia Linux / Kali / ZeroTier:** [https://localcall.netlify.app/tutorial-linux.html](https://localcall.netlify.app/tutorial-linux.html)
+
+[![Website](https://img.shields.io/badge/Website-localcall.netlify.app-6366f1?style=for-the-badge&logo=netlify&logoColor=white)](https://localcall.netlify.app/)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![C Nativo](https://img.shields.io/badge/C_Engine-DirectX_%2F_WASAPI-00599C?style=for-the-badge&logo=c&logoColor=white)](#como-compilar-do-código-fonte)
-[![DirectX DXGI](https://img.shields.io/badge/Capture-DXGI_Desktop_Duplication-0078D7?style=for-the-badge&logo=windows&logoColor=white)](#-apresentação-de-tela-a-60-fps-sem-engasgo)
+[![C Nativo](https://img.shields.io/badge/C_Engine-DirectX_%2F_WASAPI_%2F_X11-00599C?style=for-the-badge&logo=c&logoColor=white)](#como-compilar-do-código-fonte)
+[![DirectX DXGI](https://img.shields.io/badge/Capture-DXGI_%26_X11_60FPS-0078D7?style=for-the-badge&logo=windows&logoColor=white)](#-apresentação-de-tela-a-60-fps-sem-engasgo)
 [![Segurança AES-256-GCM](https://img.shields.io/badge/Crypto-AES--256--GCM_%7C_Argon2id-critical?style=for-the-badge&logo=lock)](#-criptografia-ponta-a-ponta-de-verdade-e2ee)
 [![Licença MIT](https://img.shields.io/badge/License-MIT-success?style=for-the-badge)](LICENSE)
 
