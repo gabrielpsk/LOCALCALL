@@ -1,6 +1,7 @@
 """Janela principal: lista de conectados com Green Ring (VAD), controles de voz/tela, Loopback e E2EE."""
 import base64
 import os
+import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QSize, Qt, QTimer
