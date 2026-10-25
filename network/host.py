@@ -10,8 +10,8 @@ from database.media import MAX_BYTES, valid_name
 from .audio_bridge import DEFAULT_UDP_PORT
 from .crypto import CHALLENGE_LEN, SALT_LEN, ReplayWindow, RoomKeys
 from .media import run_async
-from .protocol import (FrameReader, find_radmin_ip, pack_encrypted,
-                       pack_handshake)
+from .protocol import (FrameReader, best_matching_ip, clean_ip,
+                       find_radmin_ip, pack_encrypted, pack_handshake)
 from .video_bridge import DEFAULT_VIDEO_PORT, MAX_STREAMS
 
 MAX_CONNECTIONS = 6          # até 4 amigos + margem para handshakes
@@ -21,17 +21,7 @@ LOCKOUT_SECONDS = 60.0
 MAX_BACKOFF_SECONDS = 300.0
 RATE_LIMIT_PER_SEC = 25
 
-
-def _clean_ip(addr: QHostAddress) -> str:
-    res = addr.toIPv4Address()
-    if isinstance(res, tuple):
-        val, ok = res
-        if ok:
-            return QHostAddress(val).toString()
-    elif isinstance(res, int) and res:
-        return QHostAddress(res).toString()
-    s = addr.toString()
-    return s[7:] if s.startswith("::ffff:") else s
+_clean_ip = clean_ip
 
 
 class HostSession(QObject):
@@ -323,6 +313,11 @@ class HostSession(QObject):
 
         for sock in self._peers:
             host_ip = _clean_ip(sock.localAddress())
+            peer_ip = self._peers[sock]["ip"]
+            # Se sock.localAddress() retornar 0.0.0.0, vazio ou loopback para peer externo:
+            if not host_ip or host_ip in ("0.0.0.0", "::") or (host_ip.startswith("127.") and not peer_ip.startswith("127.")):
+                host_ip = best_matching_ip(peer_ip) or find_radmin_ip() or host_ip or "127.0.0.1"
+
             eps = [{
                 "name": self.name,
                 "ip": host_ip,

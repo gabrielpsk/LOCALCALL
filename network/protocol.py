@@ -82,6 +82,46 @@ def find_radmin_ip() -> str | None:
     return candidates[0][0] if candidates else None
 
 
+def clean_ip(addr) -> str:
+    """Extrai string IPv4 limpa (remove prefixo IPv4-mapped ::ffff: e trata QHostAddress)."""
+    if addr is None:
+        return ""
+    if hasattr(addr, "toIPv4Address"):
+        res = addr.toIPv4Address()
+        if isinstance(res, tuple):
+            val, ok = res
+            if ok:
+                from PyQt6.QtNetwork import QHostAddress
+                return QHostAddress(val).toString()
+        elif isinstance(res, int) and res:
+            from PyQt6.QtNetwork import QHostAddress
+            return QHostAddress(res).toString()
+    s = addr.toString() if hasattr(addr, "toString") else str(addr)
+    return s[7:] if s.startswith("::ffff:") else s
+
+
+def best_matching_ip(peer_ip: str) -> str | None:
+    """Encontra o IP de interface local mais adequado para comunicar com peer_ip."""
+    if not peer_ip:
+        return None
+    candidates = [ip for ip, _ in list_network_ips()]
+    if peer_ip.startswith("26."):
+        for c in candidates:
+            if c.startswith("26."):
+                return c
+    parts = peer_ip.split(".")
+    if len(parts) == 4:
+        pfx24 = ".".join(parts[:3]) + "."
+        for c in candidates:
+            if c.startswith(pfx24):
+                return c
+        pfx16 = ".".join(parts[:2]) + "."
+        for c in candidates:
+            if c.startswith(pfx16):
+                return c
+    return candidates[0] if candidates else None
+
+
 def validate_message(msg: dict) -> bool:
     """Valida tipos e tamanhos dos campos do dicionário JSON recebido."""
     if not isinstance(msg, dict):

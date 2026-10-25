@@ -141,6 +141,27 @@ def _create_all_shortcuts(target_exe: Path, app_name: str = DEFAULT_APP_NAME, de
     return True
 
 
+def _add_firewall_rule(exe_path: Path):
+    """Permite conexões de entrada TCP/UDP para o LocalCall no Windows Defender Firewall."""
+    try:
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                "name=LocalCall",
+                "dir=in",
+                "action=allow",
+                f"program={str(exe_path)}",
+                "enable=yes",
+                "profile=any",
+            ],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
 LIGHT_STYLE = """
 * {
     font-family: "Segoe UI", sans-serif;
@@ -498,6 +519,9 @@ class InstallerWindow(QDialog):
             # Cria atalhos no Menu Iniciar (Win + S) e Área de Trabalho
             _create_all_shortcuts(dest / "LocalCall.exe", desktop_requested=self.shortcut_chk.isChecked())
 
+            # Configura regra de firewall para permitir tráfego TCP/UDP da chamada
+            _add_firewall_rule(dest / "LocalCall.exe")
+
             # Cria script de desinstalação completo na pasta do app
             uninstaller_script = dest / "desinstalar.bat"
             uninstaller_script.write_text(
@@ -505,6 +529,7 @@ class InstallerWindow(QDialog):
                 f"echo Desinstalando LocalCall...\r\n"
                 f"taskkill /F /IM LocalCall.exe >nul 2>nul\r\n"
                 f"timeout /t 1 >nul\r\n"
+                f'netsh advfirewall firewall delete rule name="LocalCall" >nul 2>nul\r\n'
                 f'del /Q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\LocalCall.lnk" >nul 2>nul\r\n'
                 f'del /Q "%USERPROFILE%\\Desktop\\LocalCall.lnk" >nul 2>nul\r\n'
                 f'del /Q "%USERPROFILE%\\OneDrive\\Área de Trabalho\\LocalCall.lnk" >nul 2>nul\r\n'

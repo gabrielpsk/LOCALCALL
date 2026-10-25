@@ -621,6 +621,13 @@ EXPORT int audio_init(int local_udp_port) {
         return -2;
     }
 
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+    BOOL bNewBehavior = FALSE;
+    DWORD dwBytesReturned = 0;
+    WSAIoctl(g_sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
+
     DWORD rcv_timeout = 100;
     setsockopt(g_sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&rcv_timeout, sizeof(rcv_timeout));
 

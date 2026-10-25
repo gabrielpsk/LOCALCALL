@@ -11,6 +11,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <stdio.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <mfapi.h>
@@ -804,6 +805,31 @@ static DWORD WINAPI rx_thread_proc(LPVOID param) {
         int from_len = sizeof(from_addr);
         int n = recvfrom(g_sock, (char *)pkt, sizeof(pkt), 0,
                          (struct sockaddr *)&from_addr, &from_len);
+        if (n == 4) {
+            if (memcmp(pkt, "PING", 4) == 0) {
+                sendto(g_sock, "PONG", 4, 0, (struct sockaddr *)&from_addr, sizeof(from_addr));
+                if (!is_known_target_ip(from_addr.sin_addr.s_addr)) {
+                    EnterCriticalSection(&g_lock);
+                    if (g_num_targets < MAX_TARGETS) {
+                        g_targets[g_num_targets++] = from_addr;
+                    }
+                    LeaveCriticalSection(&g_lock);
+                }
+                continue;
+            } else if (memcmp(pkt, "PONG", 4) == 0) {
+                if (!is_known_target_ip(from_addr.sin_addr.s_addr)) {
+                    EnterCriticalSection(&g_lock);
+                    if (g_num_targets < MAX_TARGETS) {
+                        g_targets[g_num_targets++] = from_addr;
+                    }
+                    LeaveCriticalSection(&g_lock);
+                }
+                continue;
+            }
+        } else if (n <= 0) {
+            continue;
+        }
+
         int min_len = (int)(sizeof(PacketHeader) + CRYPTO_NONCE_LEN + CRYPTO_TAG_LEN);
         if (n <= min_len) continue;
 
@@ -817,10 +843,9 @@ static DWORD WINAPI rx_thread_proc(LPVOID param) {
         uint32_t sid      = 0;
 
         /* Abre e autentica o pacote via AES-256-GCM */
-        if (crypto_open(&g_crypto, (const uint8_t *)hdr, sizeof(PacketHeader),
-                        nonce, cipher, cipher_len, tag, plain_chunk, &sid) != 0 || sid == 0) {
-            continue;
-        }
+        int rc = crypto_open(&g_crypto, (const uint8_t *)hdr, sizeof(PacketHeader),
+                             nonce, cipher, cipher_len, tag, plain_chunk, &sid);
+        if (rc != 0 || sid == 0) continue;
 
         /* Se autenticado com sucesso e o IP ainda não constava, registra como alvo dinamicamente (NAT punch-through) */
         if (!is_known_target_ip(from_addr.sin_addr.s_addr)) {
@@ -941,6 +966,13 @@ EXPORT int video_init(int local_udp_port) {
         return -2;
     }
 
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+    BOOL bNewBehavior = FALSE;
+    DWORD dwBytesReturned = 0;
+    WSAIoctl(g_sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
+
     int rcv_buf = 8 * 1024 * 1024;
     int snd_buf = 8 * 1024 * 1024;
     DWORD rcv_timeout = 100;
@@ -1041,6 +1073,9 @@ EXPORT void video_add_target(const char *ip, int remote_port) {
         if (g_targets[i].sin_addr.s_addr == addr.sin_addr.s_addr &&
             g_targets[i].sin_port == addr.sin_port) {
             LeaveCriticalSection(&g_lock);
+            if (g_sock != INVALID_SOCKET) {
+                sendto(g_sock, "PING", 4, 0, (struct sockaddr *)&addr, sizeof(addr));
+            }
             return;
         }
     }
@@ -1048,6 +1083,11 @@ EXPORT void video_add_target(const char *ip, int remote_port) {
         g_targets[g_num_targets++] = addr;
     }
     LeaveCriticalSection(&g_lock);
+
+    /* Envia probe UDP imediatamente para abrir NAT e firewall nos dois lados */
+    if (g_sock != INVALID_SOCKET) {
+        sendto(g_sock, "PING", 4, 0, (struct sockaddr *)&addr, sizeof(addr));
+    }
 }
 
 EXPORT void video_remove_targets(void) {

@@ -137,7 +137,7 @@ class AudioBridge:
                 continue
             ip = str(ep.get("ip", "")).strip()
             port = int(ep.get("udp_port") or DEFAULT_UDP_PORT)
-            if ip and port > 0:
+            if ip and port > 0 and ip not in ("0.0.0.0", "::"):
                 self._dll.audio_add_peer(ip.encode("ascii", errors="ignore"), port)
             sid = int(ep.get("sender_id") or 0)
             if 0 < sid < 16:

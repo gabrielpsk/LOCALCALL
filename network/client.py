@@ -7,7 +7,8 @@ from PyQt6.QtNetwork import QAbstractSocket, QTcpSocket
 from .audio_bridge import DEFAULT_UDP_PORT
 from .crypto import CHALLENGE_LEN, SALT_LEN, ReplayWindow, RoomKeys
 from .media import run_async
-from .protocol import FrameReader, pack_encrypted, pack_handshake
+from .protocol import (FrameReader, clean_ip, pack_encrypted,
+                       pack_handshake)
 from .video_bridge import DEFAULT_VIDEO_PORT
 
 
@@ -120,8 +121,27 @@ class ClientSession(QObject):
         ):
             t = msg.get("t")
             if t == "peers":
+                endpoints = msg.get("endpoints", [])
+                peer_addr = clean_ip(self._sock.peerAddress()) if self._sock else ""
+                fallback_host = peer_addr or self.host
+                host_name = (msg.get("names") or [""])[0]
+
+                for ep in endpoints:
+                    # O Host tem sender_id = 1 ou seu nome coincide com o primeiro da lista
+                    is_host = ep.get("sender_id") == 1 or ep.get("name") == host_name
+                    ep_ip = str(ep.get("ip", "")).strip()
+
+                    if is_host:
+                        if fallback_host:
+                            ep["ip"] = fallback_host
+                    elif not ep_ip or ep_ip in ("0.0.0.0", "::", "::1", "localhost"):
+                        if fallback_host and fallback_host not in ("127.0.0.1", "::1", "localhost"):
+                            ep["ip"] = fallback_host
+                    elif ep_ip.startswith("127.") and fallback_host and not fallback_host.startswith("127."):
+                        ep["ip"] = fallback_host
+
                 self.peers_changed.emit(msg["names"])
-                self.endpoints_changed.emit(msg.get("endpoints", []))
+                self.endpoints_changed.emit(endpoints)
             elif t == "streams":
                 self.streams_changed.emit(msg.get("active", []))
             elif t == "kicked":

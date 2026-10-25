@@ -578,6 +578,31 @@ static void *rx_thread_proc(void *param) {
         socklen_t from_len = sizeof(from_addr);
         ssize_t n = recvfrom(g_sock, pkt, sizeof(pkt), 0,
                              (struct sockaddr *)&from_addr, &from_len);
+        if (n == 4) {
+            if (memcmp(pkt, "PING", 4) == 0) {
+                sendto(g_sock, "PONG", 4, 0, (struct sockaddr *)&from_addr, sizeof(from_addr));
+                if (!is_known_target_ip(from_addr.sin_addr.s_addr)) {
+                    pthread_mutex_lock(&g_lock);
+                    if (g_num_targets < MAX_TARGETS) {
+                        g_targets[g_num_targets++] = from_addr;
+                    }
+                    pthread_mutex_unlock(&g_lock);
+                }
+                continue;
+            } else if (memcmp(pkt, "PONG", 4) == 0) {
+                if (!is_known_target_ip(from_addr.sin_addr.s_addr)) {
+                    pthread_mutex_lock(&g_lock);
+                    if (g_num_targets < MAX_TARGETS) {
+                        g_targets[g_num_targets++] = from_addr;
+                    }
+                    pthread_mutex_unlock(&g_lock);
+                }
+                continue;
+            }
+        } else if (n <= 0) {
+            continue;
+        }
+
         ssize_t min_len = (ssize_t)(sizeof(PacketHeader) + CRYPTO_NONCE_LEN + CRYPTO_TAG_LEN);
         if (n <= min_len) continue;
 
@@ -789,6 +814,9 @@ EXPORT void video_add_target(const char *ip, int remote_port) {
         if (g_targets[i].sin_addr.s_addr == addr.sin_addr.s_addr &&
             g_targets[i].sin_port == addr.sin_port) {
             pthread_mutex_unlock(&g_lock);
+            if (g_sock >= 0) {
+                sendto(g_sock, "PING", 4, 0, (struct sockaddr *)&addr, sizeof(addr));
+            }
             return;
         }
     }
@@ -796,6 +824,11 @@ EXPORT void video_add_target(const char *ip, int remote_port) {
         g_targets[g_num_targets++] = addr;
     }
     pthread_mutex_unlock(&g_lock);
+
+    /* Envia probe UDP imediatamente para abrir NAT e firewall nos dois lados */
+    if (g_sock >= 0) {
+        sendto(g_sock, "PING", 4, 0, (struct sockaddr *)&addr, sizeof(addr));
+    }
 }
 
 EXPORT void video_remove_targets(void) {

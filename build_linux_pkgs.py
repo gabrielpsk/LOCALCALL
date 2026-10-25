@@ -13,25 +13,27 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 tar_path = os.path.join(OUTPUT_DIR, "localcall-v1.0.0-linux-x86_64.tar.gz")
 print(f"Gerando {tar_path}...")
 
-files_to_include = [
-    ("main.py", "main.py"),
-    ("requirements.txt", "requirements.txt"),
-    ("README.md", "README.md"),
-    ("build_linux.sh", "build_linux.sh"),
-    ("audio_engine/audio_engine_linux.c", "audio_engine/audio_engine_linux.c"),
-    ("audio_engine/audio_engine.c", "audio_engine/audio_engine.c"),
-    ("video_engine/video_engine_linux.c", "video_engine/video_engine_linux.c"),
-    ("video_engine/video_engine.c", "video_engine/video_engine.c"),
-    ("network/protocol.py", "network/protocol.py"),
-    ("network/crypto.py", "network/crypto.py"),
-    ("network/audio_bridge.py", "network/audio_bridge.py"),
-    ("network/video_bridge.py", "network/video_bridge.py"),
-    ("database/store.py", "database/store.py"),
-    ("database/media.py", "database/media.py"),
-    ("ui/main_window.py", "ui/main_window.py"),
-    ("ui/style.qss", "ui/style.qss"),
-    ("ui/icon.png", "ui/icon.png"),
-]
+def get_all_source_files():
+    includes = [
+        ("main.py", "main.py"),
+        ("requirements.txt", "requirements.txt"),
+        ("README.md", "README.md"),
+        ("build_linux.sh", "build_linux.sh"),
+    ]
+    for sub in ["audio_engine", "video_engine", "network", "database", "ui"]:
+        sub_path = os.path.join(SOURCE_DIR, sub)
+        if os.path.isdir(sub_path):
+            for root, _, files in os.walk(sub_path):
+                if "__pycache__" in root:
+                    continue
+                for f in files:
+                    if f.endswith((".py", ".c", ".h", ".sh", ".qss", ".png")):
+                        full = os.path.join(root, f)
+                        rel = os.path.relpath(full, SOURCE_DIR).replace("\\", "/")
+                        includes.append((rel, rel))
+    return sorted(list(set(includes)))
+
+files_to_include = get_all_source_files()
 
 # Copia também o install.sh para o tarball
 install_sh_src = os.path.join(OUTPUT_DIR, "install.sh")

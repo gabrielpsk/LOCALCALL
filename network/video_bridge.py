@@ -181,7 +181,7 @@ class VideoBridge(QObject):
                 continue
             ip = str(ep.get("ip", "")).strip()
             port = int(ep.get("video_port") or DEFAULT_VIDEO_PORT)
-            if ip and port > 0:
+            if ip and port > 0 and ip not in ("0.0.0.0", "::"):
                 self._dll.video_add_target(ip.encode("ascii", errors="ignore"), port)
 
     def cleanup(self):
