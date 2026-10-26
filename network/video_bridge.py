@@ -40,6 +40,7 @@ class VideoBridge(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._busy_frame = False
         self._dll = None
         self._cb_ref = None
         self.active_port = 0
@@ -103,13 +104,23 @@ class VideoBridge(QObject):
         # processamento desnecessário e o efeito espelho infinito (túnel recursivo).
         if not data_ptr or width <= 0 or height <= 0 or stream_id == 0:
             return
+        if self._busy_frame:
+            return
         try:
-            byte_count = height * stride
-            raw = ctypes.string_at(data_ptr, byte_count)
-            img = QImage(raw, width, height, stride, QImage.Format.Format_ARGB32).copy()
+            self._busy_frame = True
+            # Usa sip.voidptr para construir QImage diretamente sobre o buffer da DLL C
+            # e faz apenas UMA cópia sob gestão do Qt, eliminando ctypes.string_at()
+            try:
+                import PyQt6.sip as sip
+                ptr = sip.voidptr(ctypes.addressof(data_ptr.contents))
+            except Exception:
+                ptr = ctypes.string_at(data_ptr, height * stride)
+            img = QImage(ptr, width, height, stride, QImage.Format.Format_ARGB32).copy()
             self.frame_received.emit(stream_id, img)
         except Exception:
             pass
+        finally:
+            self._busy_frame = False
 
     @property
     def available(self) -> bool:
