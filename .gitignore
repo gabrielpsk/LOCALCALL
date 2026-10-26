@@ -31,6 +31,7 @@ ENV/
 *.AppImage
 *.pkg
 *.spec
+*.zip
 Instalador_LocalCall.exe
 
 # Local configs and databases

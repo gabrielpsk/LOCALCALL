@@ -111,10 +111,10 @@ def ensure_radmin_launched() -> tuple[bool, str]:
                 pass
 
     if ip:
-        return True, f"Interface detectada ({ip})"
+        return True, f"Conexão Direta P2P ativa ({ip})"
     return (
-        False,
-        "Radmin VPN não detectado em execução. Você pode usar Radmin VPN, ZeroTier ou rede local (LAN).",
+        True,
+        "Conexão Direta P2P ativa (UPnP / LAN / IP Público).",
     )
 
 

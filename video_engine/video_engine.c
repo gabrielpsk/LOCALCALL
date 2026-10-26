@@ -30,7 +30,7 @@
 #define MAX_PIXELS       (MAX_W * MAX_H)
 #define MAX_RAW_BYTES    (MAX_PIXELS * 4)
 #define MAX_COMP_BYTES   (MAX_RAW_BYTES + 65536)
-#define CHUNK_PAYLOAD    1340
+#define CHUNK_PAYLOAD    1300
 #define MAX_CHUNKS       ((MAX_COMP_BYTES / CHUNK_PAYLOAD) + 8)
 #define MAX_TARGETS      8
 #define MAX_STREAMS      2

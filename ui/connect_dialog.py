@@ -22,15 +22,13 @@ class ConnectDialog(QDialog):
         self.mode = QComboBox()
         self.mode.addItems(["Entrar em uma sala", "Hospedar sala"])
         self.address = QLineEdit()
-        if _IS_LINUX:
-            self.address.setPlaceholderText("IP do host (ZeroTier, Radmin VPN, tun0 ou LAN)")
-        else:
-            self.address.setPlaceholderText("IP do host (Radmin 26.x.x.x, ZeroTier ou LAN)")
+        self.address.setPlaceholderText("IP do host (ex.: 192.168.1.50 ou IP Público:Porta)")
+        self.address.textChanged.connect(self._on_address_changed)
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
         self.port.setValue(DEFAULT_PORT)
 
-        # Seletor/Exibição automática de IPs (ZeroTier zt..., VPN tun0, Radmin 26.x.x.x, eth0/wlan0) + botão "Copiar meu IP"
+        # Seletor/Exibição automática de IPs (LAN, IP Público / UPnP, VPN) + botão "Copiar meu IP"
         self.ip_combo = QComboBox()
         self.radmin_label = QLabel()
         self.radmin_label.setObjectName("hint")
@@ -46,7 +44,7 @@ class ConnectDialog(QDialog):
         self._refresh_ips()
 
         # Campo de senha mascarado + botões Mostrar, Gerar e Copiar
-        self.password = QLineEdit(last_password or generate_strong_password())
+        self.password = QLineEdit(last_password or "sala123")
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.password.setPlaceholderText("Senha da sala (nunca trafega na rede)")
         self.password.textChanged.connect(self._update_pw_hint)
@@ -72,7 +70,7 @@ class ConnectDialog(QDialog):
         self.pw_hint.setObjectName("hint")
         self.pw_hint.setWordWrap(True)
 
-        ip_row_title = "Meu IP (VPN/LAN)" if _IS_LINUX else "Meu IP"
+        ip_row_title = "Meu IP (Para compartilhar)"
         form = QFormLayout()
         form.addRow("Seu nome", self.name)
         form.addRow("Modo", self.mode)
@@ -133,6 +131,18 @@ class ConnectDialog(QDialog):
         if not is_join and not self.password.text().strip():
             self._generate_pw()
 
+    def _on_address_changed(self, text: str):
+        val = text.strip()
+        if ":" in val and not val.startswith("["):
+            parts = val.split(":")
+            if len(parts) == 2 and parts[1].isdigit():
+                self.address.blockSignals(True)
+                self.address.setText(parts[0].strip())
+                self.address.blockSignals(False)
+                p = int(parts[1])
+                if 1024 <= p <= 65535:
+                    self.port.setValue(p)
+
     def _copy_radmin_ip(self):
         if self.ip_combo.isVisible() and self.ip_combo.currentData():
             selected_ip = str(self.ip_combo.currentData())
@@ -140,8 +150,10 @@ class ConnectDialog(QDialog):
             selected_ip = detect_radmin_ip() or self.radmin_ip or ""
         if selected_ip:
             self.radmin_ip = selected_ip
-            QApplication.clipboard().setText(selected_ip)
-            self.pw_hint.setText(f"IP ({selected_ip}) copiado para a área de transferência.")
+            port_val = self.port.value()
+            full_addr = f"{selected_ip}:{port_val}"
+            QApplication.clipboard().setText(full_addr)
+            self.pw_hint.setText(f"Endereço ({full_addr}) copiado! Envie aos participantes.")
 
     def _toggle_echo(self, checked: bool):
         self.password.setEchoMode(
@@ -168,22 +180,10 @@ class ConnectDialog(QDialog):
             self.address.setFocus()
             return
         pw = self.password.text().strip()
-        if not pw:
+        if not pw or len(pw) < 4:
+            QMessageBox.warning(self, "Senha Curta", "Digite uma senha de ao menos 4 caracteres para a sala.")
             self.password.setFocus()
             return
-
-        strong, msg = is_password_strong(pw)
-        if not strong:
-            ans = QMessageBox.warning(
-                self,
-                "Senha Fraca",
-                f"{msg}\n\nDeseja continuar mesmo assim?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if ans != QMessageBox.StandardButton.Yes:
-                self.password.setFocus()
-                return
         self.accept()
 
     def values(self):

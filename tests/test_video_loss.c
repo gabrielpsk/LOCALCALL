@@ -4,7 +4,7 @@
 #include <string.h>
 
 #define TILE_SZ 32
-#define CHUNK_PAYLOAD 1340
+#define CHUNK_PAYLOAD 1300
 #define TILE_MODE_RLE   0
 #define TILE_MODE_VIDEO 1
 #define MAX_TILES 3000

@@ -273,6 +273,11 @@ static void mix_output(int16_t *out_pcm) {
     for (int i = 0; i < MAX_STREAMS; i++) {
         PeerStream *s = &g_streams[i];
         if (s->stream_key != 0 && s->count > 0 && (now - s->last_rx) < 1000) {
+            /* Se o buffer acumulou atraso (> 3 frames = 60ms), avança 1 frame extra para manter baixa latência */
+            if (s->count > 3) {
+                s->read_idx = (s->read_idx + 1) % RING_FRAMES;
+                s->count--;
+            }
             uint32_t sid = s->sender_id & 0x0Fu;
             int is_loop = (s->stream_key & 0x8000u) != 0;
             int muted = is_loop ? g_peer_loop_muted[sid] : g_peer_muted[sid];
@@ -336,11 +341,45 @@ static DWORD WINAPI rx_thread_proc(LPVOID param) {
         int from_len = sizeof(from_addr);
         int n = recvfrom(g_sock, (char *)pkt, sizeof(pkt), 0,
                          (struct sockaddr *)&from_addr, &from_len);
+        if (n == 4) {
+            if (memcmp(pkt, "PING", 4) == 0) {
+                sendto(g_sock, "PONG", 4, 0, (struct sockaddr *)&from_addr, sizeof(from_addr));
+                if (!is_known_peer_ip(from_addr.sin_addr.s_addr)) {
+                    EnterCriticalSection(&g_lock);
+                    if (g_num_peers < MAX_PEERS) {
+                        g_peers[g_num_peers++] = from_addr;
+                    }
+                    LeaveCriticalSection(&g_lock);
+                }
+                continue;
+            } else if (memcmp(pkt, "PONG", 4) == 0) {
+                if (!is_known_peer_ip(from_addr.sin_addr.s_addr)) {
+                    EnterCriticalSection(&g_lock);
+                    if (g_num_peers < MAX_PEERS) {
+                        g_peers[g_num_peers++] = from_addr;
+                    }
+                    LeaveCriticalSection(&g_lock);
+                }
+                continue;
+            }
+        }
         if (n != AUDIO_PKT_LEN && n != AUDIO_PKT_LEN_48K) continue;
         uint8_t magic = pkt[0];
         if (magic != AUDIO_MAGIC_MIC && magic != AUDIO_MAGIC_LOOP) continue;
         if (InterlockedCompareExchange(&g_deafened, 0, 0)) continue;
         if (!is_known_peer_ip(from_addr.sin_addr.s_addr)) continue;
+
+        /* Atualiza a porta do peer se NAT tiver remapeado a porta externa */
+        EnterCriticalSection(&g_lock);
+        for (int p = 0; p < g_num_peers; p++) {
+            if (g_peers[p].sin_addr.s_addr == from_addr.sin_addr.s_addr) {
+                if (g_peers[p].sin_port != from_addr.sin_port) {
+                    g_peers[p].sin_port = from_addr.sin_port;
+                }
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_lock);
 
         /* Se estamos enviando nosso próprio loopback, ignoramos loopback alheio para evitar loop infinito */
         if (magic == AUDIO_MAGIC_LOOP && InterlockedCompareExchange(&g_loopback_enabled, 0, 0)) {
@@ -628,7 +667,11 @@ EXPORT int audio_init(int local_udp_port) {
     DWORD dwBytesReturned = 0;
     WSAIoctl(g_sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
 
+    int rcv_buf = 2 * 1024 * 1024;
+    int snd_buf = 2 * 1024 * 1024;
     DWORD rcv_timeout = 100;
+    setsockopt(g_sock, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv_buf, sizeof(rcv_buf));
+    setsockopt(g_sock, SOL_SOCKET, SO_SNDBUF, (const char *)&snd_buf, sizeof(snd_buf));
     setsockopt(g_sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&rcv_timeout, sizeof(rcv_timeout));
 
     struct sockaddr_in bind_addr = {0};
@@ -757,6 +800,9 @@ EXPORT void audio_add_peer(const char *ip, int remote_port) {
         if (g_peers[i].sin_addr.s_addr == addr.sin_addr.s_addr &&
             g_peers[i].sin_port == addr.sin_port) {
             LeaveCriticalSection(&g_lock);
+            if (g_sock != INVALID_SOCKET) {
+                sendto(g_sock, "PING", 4, 0, (struct sockaddr *)&addr, sizeof(addr));
+            }
             return;
         }
     }
@@ -764,6 +810,11 @@ EXPORT void audio_add_peer(const char *ip, int remote_port) {
         g_peers[g_num_peers++] = addr;
     }
     LeaveCriticalSection(&g_lock);
+
+    /* Envia probe UDP imediatamente para abrir NAT e firewall nos dois lados */
+    if (g_sock != INVALID_SOCKET) {
+        sendto(g_sock, "PING", 4, 0, (struct sockaddr *)&addr, sizeof(addr));
+    }
 }
 
 EXPORT void audio_remove_peers(void) {

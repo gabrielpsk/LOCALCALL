@@ -36,7 +36,15 @@ class ClientSession(QObject):
         parent=None,
     ):
         super().__init__(parent)
-        self.store, self.name, self.host, self.port = store, name, host, port
+        clean_host = host.strip()
+        clean_port = port
+        if ":" in clean_host and not clean_host.startswith("["):
+            parts = clean_host.split(":")
+            if len(parts) == 2 and parts[1].isdigit():
+                clean_host = parts[0]
+                clean_port = int(parts[1])
+
+        self.store, self.name, self.host, self.port = store, name, clean_host, clean_port
         self.password = password
         self.udp_port = udp_port
         self.video_port = video_port

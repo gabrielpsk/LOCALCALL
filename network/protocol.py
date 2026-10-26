@@ -28,19 +28,39 @@ ALLOWED_TYPES = {
 }
 
 
-def list_network_ips() -> list[tuple[str, str]]:
+def is_private_ip(ip: str) -> bool:
+    """Verifica se o IP pertence a faixas privadas / locais / CGNAT / VPN."""
+    if not ip:
+        return True
+    if ip.startswith(("10.", "192.168.", "127.", "169.254.", "26.")):
+        return True
+    if ip.startswith("172."):
+        parts = ip.split(".")
+        if len(parts) >= 2 and parts[1].isdigit():
+            val = int(parts[1])
+            if 16 <= val <= 31:
+                return True
+    if ip.startswith("100."):
+        parts = ip.split(".")
+        if len(parts) >= 2 and parts[1].isdigit():
+            val = int(parts[1])
+            if 64 <= val <= 127:
+                return True
+    return False
+
+
+def list_network_ips(include_public: bool = True) -> list[tuple[str, str]]:
     """
-    Lista IPs IPv4 ativos das interfaces de rede ordenados por prioridade:
-    1. Radmin VPN (26.x.x.x)
-    2. ZeroTier (zt*)
-    3. VPN / Túnel (tun*, tap*, wg*, tailscale*)
-    4. Rede local Ethernet / Wi-Fi (eth*, en*, wlan*, wl*, etc.)
+    Lista IPs IPv4 ordenados por prioridade de rota e velocidade:
+    1. Rede Local LAN (Ethernet / Wi-Fi - velocidade nativa máxima, latência < 1ms)
+    2. IP Público Direto / UPnP (Conexão direta pela internet sem VPN)
+    3. VPN existente se houver (Radmin VPN, ZeroTier, Tailscale, tun/tap)
     Retorna lista de tuplas (ip, descricao_amigavel).
     """
-    radmin_ips: list[tuple[str, str]] = []
+    lan_ips: list[tuple[str, str]] = []
     zerotier_ips: list[tuple[str, str]] = []
     vpn_ips: list[tuple[str, str]] = []
-    lan_ips: list[tuple[str, str]] = []
+    radmin_ips: list[tuple[str, str]] = []
 
     for iface in QNetworkInterface.allInterfaces():
         flags = iface.flags()
@@ -68,18 +88,39 @@ def list_network_ips() -> list[tuple[str, str]]:
             elif ifname_low.startswith(("tun", "tap", "wg", "tailscale", "ppp", "ham")):
                 vpn_ips.append((s, f"{s} (VPN: {ifname})"))
             else:
-                lan_ips.append((s, f"{s} ({ifname})"))
+                lan_ips.append((s, f"{s} (Rede Local: {ifname})"))
 
-    return radmin_ips + zerotier_ips + vpn_ips + lan_ips
+    public_ips: list[tuple[str, str]] = []
+    if include_public:
+        try:
+            from .upnp import get_public_ip
+            pub = get_public_ip(timeout=1.0)
+            if pub and not any(pub == item[0] for item in (lan_ips + radmin_ips + zerotier_ips + vpn_ips)):
+                public_ips.append((pub, f"{pub} (IP Público / UPnP Direto)"))
+        except Exception:
+            pass
+
+    return lan_ips + public_ips + vpn_ips + zerotier_ips + radmin_ips
+
+
+def find_primary_lan_ip() -> str | None:
+    """Retorna o IP da interface local LAN preferencial (192.168.x.x ou 10.x.x.x)."""
+    candidates = list_network_ips(include_public=False)
+    for ip, _ in candidates:
+        if ip.startswith(("192.168.", "10.")) or (ip.startswith("172.") and is_private_ip(ip)):
+            return ip
+    return candidates[0][0] if candidates else None
+
+
+def find_preferred_ip() -> str | None:
+    """Retorna o melhor IP padrão: LAN > IP Público > VPN."""
+    candidates = list_network_ips(include_public=True)
+    return candidates[0][0] if candidates else None
 
 
 def find_radmin_ip() -> str | None:
-    """Retorna o IP da interface Radmin VPN (26.x.x.x) ou da interface VPN/LAN preferencial."""
-    candidates = list_network_ips()
-    for ip, _ in candidates:
-        if ip.startswith("26."):
-            return ip
-    return candidates[0][0] if candidates else None
+    """Compatibilidade retroativa: retorna o melhor IP disponível (LAN > Público > VPN)."""
+    return find_preferred_ip()
 
 
 def clean_ip(addr) -> str:
@@ -104,7 +145,7 @@ def best_matching_ip(peer_ip: str) -> str | None:
     """Encontra o IP de interface local mais adequado para comunicar com peer_ip."""
     if not peer_ip:
         return None
-    candidates = [ip for ip, _ in list_network_ips()]
+    candidates = [ip for ip, _ in list_network_ips(include_public=False)]
     if peer_ip.startswith("26."):
         for c in candidates:
             if c.startswith("26."):

@@ -25,7 +25,7 @@ from .screen_share_dialog import ScreenShareDialog
 from .sound_fx import play_chat_ping
 from .video_view import VideoStage
 
-APP_VERSION = "v1.0.8"
+APP_VERSION = "v1.1.0"
 
 
 class PeerRowWidget(QFrame):

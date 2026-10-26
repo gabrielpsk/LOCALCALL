@@ -8,14 +8,21 @@ class _Bridge(QObject):
 
     def __init__(self):
         super().__init__()
-        self.finished.connect(lambda cb, result: cb(result))
+        self.finished.connect(self._deliver)
+
+    def _deliver(self, cb, result):
+        if callable(cb):
+            try:
+                cb(result)
+            except Exception:
+                pass
 
 
 _bridge = None
 
 
 class _Job(QRunnable):
-    def __init__(self, fn, callback):
+    def __init__(self, fn, callback=None):
         super().__init__()
         self.fn, self.callback = fn, callback
 
@@ -24,10 +31,11 @@ class _Job(QRunnable):
             result = self.fn()
         except Exception:
             result = None
-        _bridge.finished.emit(self.callback, result)
+        if self.callback is not None and _bridge is not None:
+            _bridge.finished.emit(self.callback, result)
 
 
-def run_async(fn, callback):
+def run_async(fn, callback=None):
     """Roda fn() numa thread; callback(resultado) é chamado na thread principal.
     O resultado é None se fn falhar."""
     global _bridge

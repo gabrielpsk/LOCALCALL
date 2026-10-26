@@ -47,6 +47,8 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed ^
     --add-binary "video_engine/video_engine.dll;video_engine" ^
     --hidden-import "argon2" ^
     --hidden-import "cryptography" ^
+    --hidden-import "comtypes" ^
+    --hidden-import "network.upnp" ^
     main.py
 
 if %ERRORLEVEL% NEQ 0 (

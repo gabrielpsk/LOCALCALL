@@ -4,9 +4,9 @@ import tarfile
 import io
 import time
 
-SOURCE_DIR = r"c:\Users\gabri\OneDrive\Área de Trabalho\App de call"
-OUTPUT_DIR = r"C:\Users\gabri\OneDrive\Área de Trabalho\SITE APP CALL\downloads"
-VERSION = "1.0.8"
+SOURCE_DIR = r"c:\Users\gabri\OneDrive\Área de Trabalho\App de call - v2"
+OUTPUT_DIR = r"C:\Users\gabri\OneDrive\Área de Trabalho\SITE APP CALL - v2\downloads"
+VERSION = "1.1.0"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 

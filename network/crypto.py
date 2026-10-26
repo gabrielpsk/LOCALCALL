@@ -87,14 +87,13 @@ def generate_strong_password() -> str:
 
 
 def is_password_strong(password: str) -> tuple[bool, str]:
-    """Verifica força mínima da senha da sala."""
+    """Verifica se a senha da sala possui o comprimento mínimo (mínimo 4 caracteres)."""
     pw = password.strip()
-    if len(pw) < 12:
-        return False, "Senha curta (menos de 12 caracteres). Recomendamos ao menos 20 caracteres ou 6 palavras."
-    unique_chars = len(set(pw))
-    if unique_chars < 6:
-        return False, "Senha com pouca variedade de caracteres."
-    return True, "Senha forte"
+    if len(pw) < 4:
+        return False, "Senha muito curta (digite ao menos 4 caracteres)."
+    if len(pw) < 8:
+        return True, "Senha simples aceita (E2EE: Argon2id + AES-256-GCM)"
+    return True, "Senha forte (E2EE: Argon2id + AES-256-GCM)"
 
 
 def _hkdf_expand(master_key: bytes, info: bytes) -> bytes:

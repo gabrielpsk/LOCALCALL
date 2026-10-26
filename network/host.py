@@ -11,7 +11,9 @@ from .audio_bridge import DEFAULT_UDP_PORT
 from .crypto import CHALLENGE_LEN, SALT_LEN, ReplayWindow, RoomKeys
 from .media import run_async
 from .protocol import (FrameReader, best_matching_ip, clean_ip,
-                       find_radmin_ip, pack_encrypted, pack_handshake)
+                       find_preferred_ip, find_primary_lan_ip, is_private_ip,
+                       pack_encrypted, pack_handshake)
+from .upnp import get_public_ip, get_upnp_manager
 from .video_bridge import DEFAULT_VIDEO_PORT, MAX_STREAMS
 
 MAX_CONNECTIONS = 6          # até 4 amigos + margem para handshakes
@@ -63,21 +65,41 @@ class HostSession(QObject):
         self._global_fails: list[float] = []           # timestamps de falhas recentes
         self._lockout_until = 0.0
 
+        # Gerenciamento UPnP automático e detecção de IP público
+        self.upnp = get_upnp_manager()
+        self.public_ip: str | None = None
+        self.upnp_active: bool = False
+
         self._server = QTcpServer(self)
         self._server.newConnection.connect(self._on_connection)
 
     def start(self) -> bool:
-        radmin_ip = find_radmin_ip()
-        # Escuta na interface Radmin quando detectada ou permite loopback+LAN avisando o usuário
         bind_addr = QHostAddress(QHostAddress.SpecialAddress.Any)
         if not self._server.listen(bind_addr, self.port):
             self.status.emit(f"Falha ao abrir porta {self.port}: {self._server.errorString()}")
             return False
 
-        if radmin_ip:
-            self.status.emit(f"Hospedando cifrado ({radmin_ip}:{self.port})")
-        else:
-            self.status.emit(f"Hospedando cifrado na porta {self.port} (escutando em 0.0.0.0)")
+        preferred_ip = find_preferred_ip() or "127.0.0.1"
+        self.status.emit(f"Hospedando sala ({preferred_ip}:{self.port}) | Configurando UPnP...")
+
+        # Dispara mapeamento UPnP assíncrono para abrir portas no roteador sem travar a interface
+        def _bg_upnp_open():
+            try:
+                lan_ip = find_primary_lan_ip() or "0.0.0.0"
+                ok, msg = self.upnp.open_room_ports(lan_ip, self.port, self.udp_port, self.video_port)
+                self.upnp_active = ok
+                self.public_ip = self.upnp.get_external_ip_upnp() or get_public_ip(timeout=1.5)
+                if ok:
+                    disp_ip = self.public_ip or lan_ip
+                    self.status.emit(f"UPnP Ativo! Portas abertas no roteador ({disp_ip}:{self.port})")
+                elif self.public_ip:
+                    self.status.emit(f"Hospedando (IP Público STUN: {self.public_ip}:{self.port} | E2EE)")
+                else:
+                    self.status.emit(f"Hospedando cifrado na porta {self.port} ({lan_ip})")
+            except Exception as e:
+                self.status.emit(f"Hospedando cifrado na porta {self.port}")
+
+        run_async(_bg_upnp_open)
 
         self.peers_changed.emit(self.peers())
         self.endpoints_changed.emit([])
@@ -85,6 +107,12 @@ class HostSession(QObject):
         return True
 
     def stop(self):
+        # Remove mapeamentos UPnP no roteador ao fechar a sala
+        try:
+            upnp_mgr = self.upnp
+            run_async(upnp_mgr.close_all_ports)
+        except Exception:
+            pass
         self._server.close()
         for sock in list(self._pending):
             try:
@@ -314,9 +342,12 @@ class HostSession(QObject):
         for sock in self._peers:
             host_ip = _clean_ip(sock.localAddress())
             peer_ip = self._peers[sock]["ip"]
-            # Se sock.localAddress() retornar 0.0.0.0, vazio ou loopback para peer externo:
-            if not host_ip or host_ip in ("0.0.0.0", "::") or (host_ip.startswith("127.") and not peer_ip.startswith("127.")):
-                host_ip = best_matching_ip(peer_ip) or find_radmin_ip() or host_ip or "127.0.0.1"
+
+            # Se o peer é um IP de fora da rede privada e temos public_ip (via UPnP/STUN):
+            if self.public_ip and not is_private_ip(peer_ip):
+                host_ip = self.public_ip
+            elif not host_ip or host_ip in ("0.0.0.0", "::") or (host_ip.startswith("127.") and not peer_ip.startswith("127.")):
+                host_ip = best_matching_ip(peer_ip) or find_preferred_ip() or host_ip or "127.0.0.1"
 
             eps = [{
                 "name": self.name,
