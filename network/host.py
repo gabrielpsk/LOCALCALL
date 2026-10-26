@@ -89,9 +89,11 @@ class HostSession(QObject):
                 ok, msg = self.upnp.open_room_ports(lan_ip, self.port, self.udp_port, self.video_port)
                 self.upnp_active = ok
                 self.public_ip = self.upnp.get_external_ip_upnp() or get_public_ip(timeout=1.5)
+                disp_ip = self.public_ip or lan_ip
                 if ok:
-                    disp_ip = self.public_ip or lan_ip
-                    self.status.emit(f"UPnP Ativo! Portas abertas no roteador ({disp_ip}:{self.port})")
+                    self.status.emit(f"{msg} ({disp_ip}:{self.port})")
+                elif msg:
+                    self.status.emit(f"{msg} ({lan_ip}:{self.port})")
                 elif self.public_ip:
                     self.status.emit(f"Hospedando (IP Público STUN: {self.public_ip}:{self.port} | E2EE)")
                 else:

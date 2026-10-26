@@ -28,6 +28,17 @@ ALLOWED_TYPES = {
 }
 
 
+def is_cgnat_ip(ip: str) -> bool:
+    """Verifica se o IP pertence à faixa Carrier-Grade NAT (RFC 6598: 100.64.0.0/10)."""
+    if not ip or not ip.startswith("100."):
+        return False
+    parts = ip.split(".")
+    if len(parts) >= 2 and parts[1].isdigit():
+        val = int(parts[1])
+        return 64 <= val <= 127
+    return False
+
+
 def is_private_ip(ip: str) -> bool:
     """Verifica se o IP pertence a faixas privadas / locais / CGNAT / VPN."""
     if not ip:
@@ -40,12 +51,8 @@ def is_private_ip(ip: str) -> bool:
             val = int(parts[1])
             if 16 <= val <= 31:
                 return True
-    if ip.startswith("100."):
-        parts = ip.split(".")
-        if len(parts) >= 2 and parts[1].isdigit():
-            val = int(parts[1])
-            if 64 <= val <= 127:
-                return True
+    if is_cgnat_ip(ip):
+        return True
     return False
 
 

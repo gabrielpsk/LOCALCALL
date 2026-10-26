@@ -116,9 +116,7 @@ def update_system_installation():
         for item in DIST_APP.iterdir():
             dest = SYSTEM_INSTALL_DIR / item.name
             if item.is_dir():
-                if dest.exists():
-                    shutil.rmtree(dest, ignore_errors=True)
-                shutil.copytree(item, dest)
+                shutil.copytree(item, dest, dirs_exist_ok=True)
             else:
                 shutil.copy2(item, dest)
         print("      Binarios locais do sistema atualizados com sucesso para v1.1.0!")

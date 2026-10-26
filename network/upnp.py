@@ -5,8 +5,10 @@ e descubra seu IP público sem qualquer servidor intermediário de mídia, elimi
 necessidade de VPNs de terceiros (como Radmin VPN).
 """
 import atexit
+import ipaddress
 import logging
 import re
+import secrets
 import socket
 import struct
 import threading
@@ -36,6 +38,60 @@ _cached_public_ip: str | None = None
 _cached_ip_lock = threading.Lock()
 
 
+def is_valid_public_ipv4(ip_str: str) -> bool:
+    """Verifica se a string é um IPv4 público válido (não privado, não loopback, não CGNAT)."""
+    try:
+        ip = ipaddress.IPv4Address(ip_str)
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_multicast
+            or ip.is_unspecified
+            or ip.is_reserved
+            or ip.is_link_local
+        ):
+            return False
+        # Verifica CGNAT RFC 6598 (100.64.0.0/10)
+        cgnat_net = ipaddress.IPv4Network("100.64.0.0/10")
+        if ip in cgnat_net:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def is_cgnat_ipv4(ip_str: str) -> bool:
+    """Verifica se o IP está no bloco CGNAT RFC 6598 (100.64.0.0/10)."""
+    try:
+        ip = ipaddress.IPv4Address(ip_str)
+        return ip in ipaddress.IPv4Network("100.64.0.0/10")
+    except Exception:
+        return False
+
+
+def _is_safe_ssdp_url(url: str) -> bool:
+    """Hardening contra SSRF: valida se a URL SSDP aponta exclusivamente para a rede local privada."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        # Bloqueia vetores de SSRF contra serviços de nuvem ou loopback
+        if host in ("169.254.169.254", "metadata.google.internal", "localhost", "127.0.0.1"):
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private and not ip.is_loopback and not ip.is_link_local:
+                return True
+            return False
+        except ValueError:
+            return host.endswith(".local") or "." not in host
+    except Exception:
+        return False
+
+
 def get_public_ip(timeout: float = 2.0) -> str | None:
     """Descobre o IP público externo através de uma consulta UDP STUN simples (RFC 5389).
 
@@ -53,15 +109,17 @@ def get_public_ip(timeout: float = 2.0) -> str | None:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(timeout)
             # STUN Binding Request (RFC 5389): Type=0x0001, Length=0, Magic Cookie=0x2112A442
-            tx_id = b"\x4c\x6f\x63\x61\x6c\x43\x61\x6c\x6c\x50\x32\x50"  # 12 bytes
+            # Hardening: Transaction ID criptograficamente aleatório de 12 bytes contra spoofing
+            tx_id = secrets.token_bytes(12)
             req = struct.pack("!HHI12s", 0x0001, 0x0000, 0x2112A442, tx_id)
             sock.sendto(req, (host, port))
             resp, _ = sock.recvfrom(2048)
 
             if len(resp) >= 20:
                 msg_type, msg_len, cookie = struct.unpack("!HHI", resp[:8])
-                # 0x0101 = Binding Response
-                if msg_type == 0x0101 and cookie == 0x2112A442:
+                resp_tx_id = resp[8:20]
+                # 0x0101 = Binding Response com validação estrita da transação
+                if msg_type == 0x0101 and cookie == 0x2112A442 and resp_tx_id == tx_id:
                     pos = 20
                     limit = min(len(resp), 20 + msg_len)
                     while pos + 4 <= limit:
@@ -73,16 +131,18 @@ def get_public_ip(timeout: float = 2.0) -> str | None:
                                 xip = struct.unpack("!I", resp[val_pos + 4 : val_pos + 8])[0]
                                 ip_int = xip ^ 0x2112A442
                                 ip_str = socket.inet_ntoa(struct.pack("!I", ip_int))
-                                with _cached_ip_lock:
-                                    _cached_public_ip = ip_str
-                                return ip_str
+                                if is_valid_public_ipv4(ip_str):
+                                    with _cached_ip_lock:
+                                        _cached_public_ip = ip_str
+                                    return ip_str
                         elif attr_type == 0x0001 and attr_len >= 8:  # MAPPED-ADDRESS
                             _, family, mport = struct.unpack("!BBH", resp[val_pos : val_pos + 4])
                             if family == 0x01:
                                 ip_str = socket.inet_ntoa(resp[val_pos + 4 : val_pos + 8])
-                                with _cached_ip_lock:
-                                    _cached_public_ip = ip_str
-                                return ip_str
+                                if is_valid_public_ipv4(ip_str):
+                                    with _cached_ip_lock:
+                                        _cached_public_ip = ip_str
+                                    return ip_str
                         pos += 4 + attr_len
         except Exception:
             continue
@@ -179,10 +239,12 @@ class UPnPManager:
 
     def _parse_igd_description(self, url: str, timeout: float = 2.0) -> bool:
         """Baixa o XML de descrição do roteador e localiza o controlURL de WANIP/PPP."""
+        if not _is_safe_ssdp_url(url):
+            return False
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "LocalCall/1.1"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                xml_data = resp.read()
+                xml_data = resp.read(65536)  # Hardening: Limite estrito de 64 KB contra DoS de memória
 
             root = ET.fromstring(xml_data)
             # Remove namespaces XML para facilitar busca
@@ -209,7 +271,7 @@ class UPnPManager:
 
     def _soap_request(self, action: str, arguments: dict[str, str], timeout: float = 3.0) -> ET.Element | None:
         """Envia uma chamada SOAP UPnP para o controlURL do roteador."""
-        if not self.control_url or not self.service_type:
+        if not self.control_url or not self.service_type or not _is_safe_ssdp_url(self.control_url):
             return None
 
         body_args = "".join(f"<{k}>{v}</{k}>" for k, v in arguments.items())
@@ -234,7 +296,7 @@ class UPnPManager:
         try:
             req = urllib.request.Request(self.control_url, data=soap_body, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                xml_resp = resp.read()
+                xml_resp = resp.read(65536)  # Hardening: Limite estrito de 64 KB
                 root = ET.fromstring(xml_resp)
                 for elem in root.iter():
                     if "}" in elem.tag:
@@ -318,15 +380,19 @@ class UPnPManager:
         return False
 
     def get_external_ip_upnp(self) -> str | None:
-        """Obtém o IP público retornado pelo roteador via UPnP GetExternalIPAddress."""
+        """Obtém o IP externo retornado pelo roteador via UPnP GetExternalIPAddress."""
         if self.control_url and self.service_type:
             res = self._soap_request("GetExternalIPAddress", {})
             if res is not None:
                 ip_elem = res.find(".//NewExternalIPAddress")
                 if ip_elem is not None and ip_elem.text:
                     ip = ip_elem.text.strip()
-                    if ip and not ip.startswith("0.0.0.0"):
-                        return ip
+                    try:
+                        parsed = ipaddress.IPv4Address(ip)
+                        if not parsed.is_unspecified and not parsed.is_loopback:
+                            return str(parsed)
+                    except Exception:
+                        pass
         return None
 
     def open_room_ports(
@@ -351,7 +417,20 @@ class UPnPManager:
             if self.add_port_mapping(ext_p, int_p, proto, internal_ip, desc):
                 success_count += 1
 
-        ext_ip = self.get_external_ip_upnp() or get_public_ip(timeout=1.5)
+        router_wan_ip = self.get_external_ip_upnp()
+        stun_ip = get_public_ip(timeout=1.5)
+        ext_ip = stun_ip or (router_wan_ip if router_wan_ip and is_valid_public_ipv4(router_wan_ip) else None)
+
+        # Detecção de CGNAT (Carrier-Grade NAT / RFC 6598 100.64.0.0/10 ou Duplo NAT)
+        is_cgnat = False
+        if router_wan_ip and is_cgnat_ipv4(router_wan_ip):
+            is_cgnat = True
+        elif router_wan_ip and stun_ip and router_wan_ip != stun_ip and not is_valid_public_ipv4(router_wan_ip):
+            is_cgnat = True
+
+        if is_cgnat:
+            msg = f"Aviso CGNAT: Modem em NAT de operadora ({router_wan_ip or '100.64.x.x'}). Amigos fora da rede local precisam de ZeroTier/Radmin."
+            return (success_count > 0), msg
 
         if success_count > 0:
             msg = f"UPnP Ativo: {success_count}/3 portas mapeadas no roteador"
@@ -360,7 +439,7 @@ class UPnPManager:
             return True, msg
 
         if ext_ip:
-            return False, f"UPnP não ativo no roteador. IP Público detectado via STUN: {ext_ip}"
+            return False, f"UPnP desativado no roteador. IP Público STUN: {ext_ip}. Para amigos externos, ative UPnP no modem ou use ZeroTier/Radmin."
 
         return False, "UPnP e consulta externa indisponíveis no momento"
 
