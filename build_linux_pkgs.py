@@ -6,11 +6,11 @@ import time
 
 SOURCE_DIR = r"c:\Users\gabri\OneDrive\Área de Trabalho\App de call"
 OUTPUT_DIR = r"C:\Users\gabri\OneDrive\Área de Trabalho\SITE APP CALL\downloads"
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 1. Gerar localcall-v1.0.7-linux-x86_64.tar.gz
+# 1. Gerar localcall-v1.0.8-linux-x86_64.tar.gz
 tar_path = os.path.join(OUTPUT_DIR, f"localcall-v{VERSION}-linux-x86_64.tar.gz")
 print(f"Gerando {tar_path}...")
 
@@ -66,7 +66,7 @@ with tarfile.open(tar_path, "w:gz") as tar:
 
 print(f"Tarball gerado: {os.path.getsize(tar_path)} bytes")
 
-# 2. Gerar localcall_1.0.7_amd64.deb
+# 2. Gerar localcall_1.0.8_amd64.deb
 # O formato .deb é um arquivo ar no padrão GNU:
 # !<arch>\n
 # debian-binary

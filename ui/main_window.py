@@ -25,6 +25,8 @@ from .screen_share_dialog import ScreenShareDialog
 from .sound_fx import play_chat_ping
 from .video_view import VideoStage
 
+APP_VERSION = "v1.0.8"
+
 
 class PeerRowWidget(QFrame):
     """Item da lista lateral de participantes com indicador de voz ativa (Green Ring #22c55e) e menu de contexto."""
@@ -152,6 +154,11 @@ class MainWindow(QMainWindow):
         side_layout.addWidget(self.noise_button)
         side_layout.addWidget(self.conn_button)
 
+        self.version_side_label = QLabel(APP_VERSION)
+        self.version_side_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.version_side_label.setStyleSheet("color: rgba(255, 255, 255, 0.28); font-size: 11px; font-weight: 500; padding-top: 2px;")
+        side_layout.addWidget(self.version_side_label)
+
         self.tabs = QTabWidget()
         central = QWidget()
         layout = QHBoxLayout(central)
@@ -166,9 +173,12 @@ class MainWindow(QMainWindow):
         self.e2e_badge = QLabel(t("e2e_footer"))
         self.e2e_badge.setObjectName("e2eFooter")
         self.audio_label = QLabel(t("voice_inactive") if self.audio.available else t("voice_missing_dll"))
+        self.version_status_label = QLabel(APP_VERSION)
+        self.version_status_label.setStyleSheet("color: rgba(255, 255, 255, 0.28); font-size: 11px; margin-right: 6px; font-weight: 500;")
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.e2e_badge)
         self.statusBar().addPermanentWidget(self.audio_label)
+        self.statusBar().addPermanentWidget(self.version_status_label)
 
     def _on_mute_toggled(self, checked: bool):
         self.audio.set_mic_muted(checked)

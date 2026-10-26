@@ -30,7 +30,7 @@
 #define MAX_PIXELS       (MAX_W * MAX_H)
 #define MAX_RAW_BYTES    (MAX_PIXELS * 4)
 #define MAX_COMP_BYTES   (MAX_RAW_BYTES + 65536)
-#define CHUNK_PAYLOAD    1180
+#define CHUNK_PAYLOAD    1340
 #define MAX_CHUNKS       ((MAX_COMP_BYTES / CHUNK_PAYLOAD) + 8)
 #define MAX_TARGETS      8
 #define MAX_STREAMS      2
@@ -108,6 +108,7 @@ typedef struct {
     volatile LONG frame_complete;
     uint32_t   active_frame_id;
     DWORD      frame_first_pkt_ts;
+    DWORD      frame_last_pkt_ts;
     uint16_t   received_chunks_count;
     uint16_t   total_chunks_expected;
     uint32_t   tile_frame_id[MAX_TILES];
@@ -122,9 +123,9 @@ static volatile LONG    g_running   = 0;
 static volatile LONG    g_capturing = 0;
 
 /* Parâmetros da captura selecionados no ScreenShareDialog */
-static volatile LONG    g_cfg_max_h   = 720;
+static volatile LONG    g_cfg_max_h   = 1080;
 static volatile LONG    g_cfg_fps     = 60;
-static volatile LONG    g_cfg_bitrate = 4000000;
+static volatile LONG    g_cfg_bitrate = 12000000;
 static volatile LONG    g_cfg_monitor = 0;
 static volatile HWND    g_cfg_hwnd    = NULL;
 
@@ -144,8 +145,6 @@ static uint8_t *g_cap_comp  = NULL;
 static uint8_t *g_prev_bgra = NULL;
 
 static uint16_t s_tile_age[MAX_TILES]          = {0};
-static uint8_t  s_tile_mode[MAX_TILES]         = {0};
-static uint8_t  s_tile_static_count[MAX_TILES] = {0};
 
 static int is_known_target_ip(uint32_t ip_addr) {
     int ok = 0;
@@ -322,49 +321,38 @@ static void decompress_tile_rle(const uint8_t *in, uint32_t in_len, uint32_t *ti
 }
 
 static uint32_t encode_tile_video(const uint32_t *tile, int tw, int th, uint8_t *out) {
-    int qw = (tw + 1) / 2;
-    int qh = (th + 1) / 2;
-    int cw = (qw + 1) / 2;
-    int ch = (qh + 1) / 2;
-
+    int cw = (tw + 1) / 2;
+    int ch = (th + 3) / 4;
     uint8_t *dst_y  = out;
-    uint8_t *dst_co = out + (qw * qh);
+    uint8_t *dst_co = out + (tw * th);
     uint8_t *dst_cg = dst_co + (cw * ch);
 
     int co_acc[16][16] = {{0}};
     int cg_acc[16][16] = {{0}};
     int c_cnt[16][16]  = {{0}};
 
-    for (int qy = 0; qy < qh; qy++) {
-        int y0 = qy * 2;
-        int y1 = (y0 + 1 < th) ? y0 + 1 : y0;
-        const uint32_t *row0 = tile + y0 * tw;
-        const uint32_t *row1 = tile + y1 * tw;
-        int cy = qy / 2;
+    for (int y = 0; y < th; y++) {
+        const uint32_t *row = tile + y * tw;
+        int cy = y / 4;
+        for (int x = 0; x < tw; x++) {
+            uint32_t p = row[x];
+            int b =  p        & 0xFF;
+            int g = (p >> 8)  & 0xFF;
+            int r = (p >> 16) & 0xFF;
 
-        for (int qx = 0; qx < qw; qx++) {
-            int x0 = qx * 2;
-            int x1 = (x0 + 1 < tw) ? x0 + 1 : x0;
+            int y_val = (r + (g << 1) + b + 2) >> 2;
+            int co    = r - b;
+            int cg    = (-r + (g << 1) - b) >> 1;
 
-            uint32_t p00 = row0[x0];
-            uint32_t p10 = row0[x1];
-            uint32_t p01 = row1[x0];
-            uint32_t p11 = row1[x1];
+            if ((unsigned int)y_val > 255) y_val = (y_val < 0) ? 0 : 255;
+            *dst_y++ = (uint8_t)y_val;
 
-            int b = ((p00 & 0xFF) + (p10 & 0xFF) + (p01 & 0xFF) + (p11 & 0xFF) + 2) >> 2;
-            int g = (((p00 >> 8) & 0xFF) + ((p10 >> 8) & 0xFF) + ((p01 >> 8) & 0xFF) + ((p11 >> 8) & 0xFF) + 2) >> 2;
-            int r = (((p00 >> 16) & 0xFF) + ((p10 >> 16) & 0xFF) + ((p01 >> 16) & 0xFF) + ((p11 >> 16) & 0xFF) + 2) >> 2;
-
-            int y = (r + (g << 1) + b + 2) >> 2;
-            int co = (r - b);
-            int cg = (-r + (g << 1) - b) >> 1;
-
-            *dst_y++ = (uint8_t)y;
-
-            int cx = qx / 2;
-            co_acc[cy][cx] += co;
-            cg_acc[cy][cx] += cg;
-            c_cnt[cy][cx]++;
+            int cx = x / 2;
+            if (cy < 16 && cx < 16) {
+                co_acc[cy][cx] += co;
+                cg_acc[cy][cx] += cg;
+                c_cnt[cy][cx]++;
+            }
         }
     }
 
@@ -373,40 +361,42 @@ static uint32_t encode_tile_video(const uint32_t *tile, int tw, int th, uint8_t 
             int cnt = c_cnt[cy][cx];
             int co = cnt ? (co_acc[cy][cx] / cnt) : 0;
             int cg = cnt ? (cg_acc[cy][cx] / cnt) : 0;
-            *dst_co++ = (uint8_t)((co + 256) >> 1);
-            *dst_cg++ = (uint8_t)((cg + 256) >> 1);
+            int co_byte = (co + 256) >> 1;
+            int cg_byte = (cg + 256) >> 1;
+            if (co_byte < 0) co_byte = 0; if (co_byte > 255) co_byte = 255;
+            if (cg_byte < 0) cg_byte = 0; if (cg_byte > 255) cg_byte = 255;
+            *dst_co++ = (uint8_t)co_byte;
+            *dst_cg++ = (uint8_t)cg_byte;
         }
     }
 
-    return (uint32_t)(qw * qh + cw * ch * 2);
+    return (uint32_t)(tw * th + cw * ch * 2);
 }
 
 static void decode_tile_video(const uint8_t *in, uint32_t in_len, uint32_t *tile, int tw, int th) {
-    int qw = (tw + 1) / 2;
-    int qh = (th + 1) / 2;
-    int cw = (qw + 1) / 2;
-    int ch = (qh + 1) / 2;
-    uint32_t expected = (uint32_t)(qw * qh + cw * ch * 2);
+    int cw = (tw + 1) / 2;
+    int ch = (th + 3) / 4;
+    uint32_t expected = (uint32_t)(tw * th + cw * ch * 2);
     if (in_len < expected) return;
 
     const uint8_t *src_y  = in;
-    const uint8_t *src_co = in + (qw * qh);
+    const uint8_t *src_co = in + (tw * th);
     const uint8_t *src_cg = src_co + (cw * ch);
 
-    for (int qy = 0; qy < qh; qy++) {
-        int y0 = qy * 2;
-        int y1 = y0 + 1;
-        uint32_t *row0 = tile + y0 * tw;
-        uint32_t *row1 = (y1 < th) ? tile + y1 * tw : NULL;
-        int cy = qy / 2;
+    for (int y = 0; y < th; y++) {
+        uint32_t *row = tile + y * tw;
+        int cy = y / 4;
+        if (cy >= ch) cy = ch - 1;
 
-        for (int qx = 0; qx < qw; qx++) {
-            int cx = qx / 2;
-            int y = *src_y++;
+        for (int x = 0; x < tw; x++) {
+            int cx = x / 2;
+            if (cx >= cw) cx = cw - 1;
+
+            int y_val = *src_y++;
             int co = (src_co[cy * cw + cx] << 1) - 256;
             int cg = (src_cg[cy * cw + cx] << 1) - 256;
 
-            int tmp = y - (cg >> 1);
+            int tmp = y_val - (cg >> 1);
             int g = tmp + cg;
             int r = tmp + ((co + 1) >> 1);
             int b = tmp - (co >> 1);
@@ -415,17 +405,7 @@ static void decode_tile_video(const uint8_t *in, uint32_t in_len, uint32_t *tile
             if ((unsigned int)g > 255) g = (g < 0) ? 0 : 255;
             if ((unsigned int)b > 255) b = (b < 0) ? 0 : 255;
 
-            uint32_t c = (uint32_t)b | ((uint32_t)g << 8) | ((uint32_t)r << 16) | 0xFF000000u;
-
-            int x0 = qx * 2;
-            int x1 = x0 + 1;
-
-            row0[x0] = c;
-            if (x1 < tw) row0[x1] = c;
-            if (row1) {
-                row1[x0] = c;
-                if (x1 < tw) row1[x1] = c;
-            }
+            row[x] = (uint32_t)b | ((uint32_t)g << 8) | ((uint32_t)r << 16) | 0xFF000000u;
         }
     }
 }
@@ -768,14 +748,6 @@ typedef struct {
     uint32_t score;
 } TileCandidate;
 
-static int compare_tile_candidates(const void *a, const void *b) {
-    const TileCandidate *ca = (const TileCandidate *)a;
-    const TileCandidate *cb = (const TileCandidate *)b;
-    if (cb->score > ca->score) return 1;
-    if (cb->score < ca->score) return -1;
-    return 0;
-}
-
 static void send_nack_packet(uint32_t missing_frame_id) {
     if (!g_crypto.ready || g_sock == INVALID_SOCKET) return;
     uint8_t pkt[sizeof(PacketHeader) + CRYPTO_NONCE_LEN + 4 + CRYPTO_TAG_LEN];
@@ -852,29 +824,14 @@ static void encode_and_send_tiles(uint32_t frame_id, const uint32_t *cur, uint32
             diff = compute_tile_diff(cur + ty * w + tx, prev + ty * w + tx, tw, th, w);
         }
 
-        uint32_t score = 0;
-        if (force_all || !prev) {
-            score = 1000000 + (uint32_t)(total_tiles - t);
-        } else if (diff > 0) {
-            score = (uint32_t)diff + (uint32_t)s_tile_age[t] * 128;
-        } else if (is_rir || s_tile_age[t] >= 60) {
-            score = 50 + (uint32_t)s_tile_age[t];
+        if (force_all || !prev || diff > 0 || is_rir || s_tile_age[t] >= 60) {
+            candidates[cand_count++].tile_idx = (uint16_t)t;
         } else {
             s_tile_age[t]++;
-        }
-
-        if (score > 0) {
-            candidates[cand_count].tile_idx = (uint16_t)t;
-            candidates[cand_count].score = score;
-            cand_count++;
         }
     }
 
     if (cand_count == 0) return;
-
-    if (cand_count > 1 && !force_all) {
-        qsort(candidates, (size_t)cand_count, sizeof(TileCandidate), compare_tile_candidates);
-    }
 
     static uint32_t pkt_offsets[MAX_CHUNKS];
     static uint16_t pkt_lens[MAX_CHUNKS];
@@ -890,16 +847,7 @@ static void encode_and_send_tiles(uint32_t frame_id, const uint32_t *cur, uint32
     uint8_t rle_buf[TILE_SZ * TILE_SZ * 4 + 64];
     uint8_t vid_buf[TILE_SZ * TILE_SZ * 2 + 64];
 
-    int total_bytes_encoded = 0;
-
     for (int c = 0; c < cand_count; c++) {
-        if (total_bytes_encoded >= max_burst_bytes && cur_pkt[0] > 0 && !force_all) {
-            for (int rem = c; rem < cand_count; rem++) {
-                s_tile_age[candidates[rem].tile_idx]++;
-            }
-            break;
-        }
-
         int t = candidates[c].tile_idx;
         int tx = (t % cols) * TILE_SZ;
         int ty = (t / cols) * TILE_SZ;
@@ -919,15 +867,10 @@ static void encode_and_send_tiles(uint32_t frame_id, const uint32_t *cur, uint32
         const uint8_t *data_ptr = rle_buf;
         uint32_t c_len = compress_tile_rle(tile, count, rle_buf);
 
-        if (c_len > 384 || (s_tile_mode[t] == TILE_MODE_VIDEO && s_tile_static_count[t] < 10)) {
+        if (c_len > 1280) {
             mode = TILE_MODE_VIDEO;
             c_len = encode_tile_video(tile, tw, th, vid_buf);
             data_ptr = vid_buf;
-            s_tile_mode[t] = TILE_MODE_VIDEO;
-            s_tile_static_count[t] = 0;
-        } else {
-            s_tile_mode[t] = TILE_MODE_RLE;
-            if (s_tile_static_count[t] < 255) s_tile_static_count[t]++;
         }
 
         uint32_t item_sz = sizeof(TileItemHeader) + c_len;
@@ -953,8 +896,6 @@ static void encode_and_send_tiles(uint32_t frame_id, const uint32_t *cur, uint32
         cur_pkt_len += c_len;
         cur_pkt[0]++;
 
-        total_bytes_encoded += (int)item_sz;
-
         if (prev) {
             for (int y = 0; y < th; y++) {
                 uint32_t *p_dst = prev + (ty + y) * w + tx;
@@ -976,8 +917,8 @@ static void encode_and_send_tiles(uint32_t frame_id, const uint32_t *cur, uint32
     for (int i = 0; i < n_pkts; i++) {
         send_one_tile_packet(frame_id, (uint16_t)i, (uint16_t)n_pkts, w, h,
                              comp_base + pkt_offsets[i], pkt_lens[i]);
-        if ((i & 0x03) == 0x03) {
-            micro_spin_delay(30);
+        if ((i & 0x07) == 0x07) {
+            micro_spin_delay(25);
         }
     }
 }
@@ -1200,16 +1141,18 @@ static DWORD WINAPI render_thread_proc(LPVOID param) {
             if (s->sender_id == 0 || s->width <= 0 || s->height <= 0) continue;
 
             int should_render = 0;
-            if (s->frame_complete) {
+            if (InterlockedCompareExchange(&s->frame_complete, 0, 1) == 1) {
                 should_render = 1;
-            } else if (s->frame_ready && (now - s->frame_first_pkt_ts) >= 20) {
-                should_render = 1;
+                InterlockedExchange(&s->frame_ready, 0);
+            } else if (InterlockedCompareExchange(&s->frame_ready, 0, 0) == 1) {
+                if ((now - s->frame_last_pkt_ts) >= 18 || (now - s->frame_first_pkt_ts) >= 90) {
+                    should_render = 1;
+                    InterlockedExchange(&s->frame_ready, 0);
+                }
             }
 
             if (should_render) {
                 EnterCriticalSection(&s->fb_lock);
-                s->frame_complete = 0;
-                s->frame_ready = 0;
                 s->last_rendered_frame_id = s->active_frame_id;
                 s->last_render_ts = now;
                 memcpy(s->render_buf, s->bgra_buf, (size_t)s->width * (size_t)s->height * 4);
@@ -1223,7 +1166,7 @@ static DWORD WINAPI render_thread_proc(LPVOID param) {
                 }
             }
         }
-        Sleep(4);
+        Sleep(2);
     }
     return 0;
 }
@@ -1253,6 +1196,7 @@ static int find_stream_slot(uint32_t sender_id, RxStream **out_stream) {
     s->frame_complete         = 0;
     s->active_frame_id        = 0;
     s->frame_first_pkt_ts     = 0;
+    s->frame_last_pkt_ts      = 0;
     s->received_chunks_count  = 0;
     s->total_chunks_expected  = 0;
     s->last_nack_ts           = 0;
@@ -1375,6 +1319,22 @@ static DWORD WINAPI rx_thread_proc(LPVOID param) {
             }
 
             if (hdr->frame_id != s->active_frame_id) {
+                if (s->active_frame_id > 0 && InterlockedCompareExchange(&s->frame_ready, 0, 1) == 1) {
+                    EnterCriticalSection(&s->fb_lock);
+                    InterlockedExchange(&s->frame_complete, 0);
+                    s->last_rendered_frame_id = s->active_frame_id;
+                    s->last_render_ts = now;
+                    memcpy(s->render_buf, s->bgra_buf, (size_t)s->width * (size_t)s->height * 4);
+                    int rw = s->width;
+                    int rh = s->height;
+                    LeaveCriticalSection(&s->fb_lock);
+
+                    FrameCallback cb = g_callback;
+                    if (cb) {
+                        cb(stream_id, s->render_buf, rw, rh, rw * 4);
+                    }
+                }
+
                 if (s->active_frame_id > 0 && s->received_chunks_count < s->total_chunks_expected) {
                     if ((now - s->last_nack_ts) >= 30) {
                         s->last_nack_ts = now;
@@ -1383,9 +1343,12 @@ static DWORD WINAPI rx_thread_proc(LPVOID param) {
                 }
                 s->active_frame_id = hdr->frame_id;
                 s->frame_first_pkt_ts = now;
+                s->frame_last_pkt_ts  = now;
                 s->received_chunks_count = 0;
                 s->total_chunks_expected = hdr->total_chunks;
                 memset(s->chunk_seen, 0, sizeof(s->chunk_seen));
+            } else {
+                s->frame_last_pkt_ts = now;
             }
 
             if (hdr->chunk_index < MAX_CHUNKS && !s->chunk_seen[hdr->chunk_index]) {
@@ -1570,7 +1533,7 @@ EXPORT int video_start_capture_ex(int max_height, int target_fps, int bitrate, u
 
     InterlockedExchange(&g_cfg_max_h, max_height >= 1080 ? 1080 : 720);
     InterlockedExchange(&g_cfg_fps, target_fps == 30 ? 30 : 60);
-    InterlockedExchange(&g_cfg_bitrate, bitrate > 500000 ? bitrate : 4000000);
+    InterlockedExchange(&g_cfg_bitrate, bitrate > 500000 ? bitrate : 12000000);
     InterlockedExchange(&g_cfg_monitor, monitor_index >= 0 ? monitor_index : 0);
     InterlockedExchangePointer((PVOID volatile *)&g_cfg_hwnd, (PVOID)(uintptr_t)hwnd);
     InterlockedExchange(&g_capturing, 1);
@@ -1581,7 +1544,7 @@ EXPORT int video_start_capture_ex(int max_height, int target_fps, int bitrate, u
 }
 
 EXPORT int video_start_capture(int target_fps, int quality) {
-    int br = (quality >= 85) ? 8000000 : 4000000;
+    int br = (quality >= 85) ? 12000000 : 8000000;
     return video_start_capture_ex(1080, target_fps, br, 0, 0);
 }
 
