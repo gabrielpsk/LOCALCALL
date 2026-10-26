@@ -46,6 +46,10 @@
 
 #define CODEC_RLE        0x01
 #define CODEC_H264       0x02
+#define CODEC_TILES      0x03
+
+#define TILE_MODE_RLE    0
+#define TILE_MODE_VIDEO  1
 
 /* Cabeçalho binário idêntico ao Windows (13 bytes, little-endian, #pragma pack(1)) */
 #pragma pack(push, 1)
@@ -57,6 +61,12 @@ typedef struct {
     uint16_t height;
     uint8_t  codec;
 } PacketHeader;
+
+typedef struct {
+    uint16_t tile_idx;
+    uint8_t  mode;
+    uint16_t data_len;
+} TileItemHeader;
 #pragma pack(pop)
 
 typedef void (*FrameCallback)(int stream_id, const unsigned char *data, int width, int height, int stride);
@@ -78,6 +88,9 @@ typedef struct {
     uint32_t   sender_id;
     uint64_t   last_rx;
     uint32_t   last_rendered_frame_id;
+    uint64_t   last_render_ts;
+    int        width;
+    int        height;
     FrameSlot  slots[NUM_FRAME_SLOTS];
     uint8_t   *bgra_buf;
 } RxStream;
@@ -116,6 +129,7 @@ static FrameCallback      g_callback    = NULL;
 static RxStream           g_rx_streams[MAX_STREAMS];
 
 static uint8_t           *g_cap_bgra = NULL;
+static uint8_t           *g_prev_bgra = NULL;
 static uint8_t           *g_cap_comp = NULL;
 
 static volatile int       g_x11_err_flag = 0;
@@ -187,7 +201,7 @@ static void compute_scaled_dims(int src_w, int src_h, int target_max_h, int *out
  * - Redução drástica de pacotes UDP (de 2.300 pkts/frame para 10-30 pkts/frame)
  * - Elimina bufferbloat da rede e o atraso de 10 segundos
  */
-static uint32_t compress_tile_data(const uint32_t *tile, int count, uint8_t *out) {
+static uint32_t compress_tile_rle(const uint32_t *tile, int count, uint8_t *out) {
     uint8_t *dst = out;
     int i = 0;
 
@@ -222,7 +236,7 @@ static uint32_t compress_tile_data(const uint32_t *tile, int count, uint8_t *out
     return (uint32_t)(dst - out);
 }
 
-static void decompress_tile_data(const uint8_t *in, uint32_t in_len, uint32_t *tile, int count) {
+static void decompress_tile_rle(const uint8_t *in, uint32_t in_len, uint32_t *tile, int count) {
     const uint8_t *src = in;
     const uint8_t *end = in + in_len;
     int p = 0;
@@ -231,6 +245,7 @@ static void decompress_tile_data(const uint8_t *in, uint32_t in_len, uint32_t *t
         uint8_t tag = *src++;
         if (tag & 0x80) {
             int run = tag & 0x7F;
+            if (src + 3 > end) break;
             uint32_t c = (uint32_t)src[0] | ((uint32_t)src[1] << 8) | ((uint32_t)src[2] << 16) | 0xFF000000u;
             src += 3;
             for (int r = 0; r < run && p < count; r++) {
@@ -239,6 +254,7 @@ static void decompress_tile_data(const uint8_t *in, uint32_t in_len, uint32_t *t
         } else {
             int lit = tag;
             for (int l = 0; l < lit && p < count; l++) {
+                if (src + 3 > end) break;
                 uint32_t c = (uint32_t)src[0] | ((uint32_t)src[1] << 8) | ((uint32_t)src[2] << 16) | 0xFF000000u;
                 src += 3;
                 tile[p++] = c;
@@ -247,82 +263,97 @@ static void decompress_tile_data(const uint8_t *in, uint32_t in_len, uint32_t *t
     }
 }
 
-static uint32_t encode_tile_frame(const uint32_t *cur, const uint32_t *prev,
-                                  int w, int h, uint8_t *out, int force_keyframe) {
-    int cols = (w + TILE_SZ - 1) / TILE_SZ;
-    int rows = (h + TILE_SZ - 1) / TILE_SZ;
-    int total_tiles = cols * rows;
-
+static uint32_t encode_tile_video(const uint32_t *tile, int tw, int th, uint8_t *out) {
+    int qw = (tw + 1) / 2;
+    int qh = (th + 1) / 2;
     uint8_t *dst = out;
-    *dst++ = force_keyframe ? 1 : 0;
-    uint8_t *count_ptr = dst;
-    dst += 2;
 
-    uint16_t num_changed = 0;
-    uint32_t tile[TILE_SZ * TILE_SZ];
+    for (int qy = 0; qy < qh; qy++) {
+        int y0 = qy * 2;
+        int y1 = (y0 + 1 < th) ? y0 + 1 : y0;
+        const uint32_t *row0 = tile + y0 * tw;
+        const uint32_t *row1 = tile + y1 * tw;
 
-    for (int t = 0; t < total_tiles; t++) {
-        int tx = (t % cols) * TILE_SZ;
-        int ty = (t / cols) * TILE_SZ;
-        int tw = (tx + TILE_SZ <= w) ? TILE_SZ : (w - tx);
-        int th = (ty + TILE_SZ <= h) ? TILE_SZ : (h - ty);
-        int count = tw * th;
+        for (int qx = 0; qx < qw; qx++) {
+            int x0 = qx * 2;
+            int x1 = (x0 + 1 < tw) ? x0 + 1 : x0;
 
-        int changed = force_keyframe || !prev;
-        if (!changed) {
-            for (int y = 0; y < th; y++) {
-                const uint32_t *r_cur = cur + (ty + y) * w + tx;
-                const uint32_t *r_prv = prev + (ty + y) * w + tx;
-                if (memcmp(r_cur, r_prv, tw * 4) != 0) {
-                    changed = 1;
-                    break;
-                }
-            }
-        }
+            uint32_t p00 = row0[x0];
+            uint32_t p10 = row0[x1];
+            uint32_t p01 = row1[x0];
+            uint32_t p11 = row1[x1];
 
-        if (changed) {
-            num_changed++;
-            int idx = 0;
-            for (int y = 0; y < th; y++) {
-                const uint32_t *r = cur + (ty + y) * w + tx;
-                for (int x = 0; x < tw; x++) {
-                    tile[idx++] = r[x];
-                }
-            }
-            *(uint16_t *)dst = (uint16_t)t; dst += 2;
-            uint32_t c_len = compress_tile_data(tile, count, dst + 2);
-            *(uint16_t *)dst = (uint16_t)c_len; dst += 2;
-            dst += c_len;
+            uint32_t b = ((p00 & 0xFF) + (p10 & 0xFF) + (p01 & 0xFF) + (p11 & 0xFF) + 2) >> 2;
+            uint32_t g = (((p00 >> 8) & 0xFF) + ((p10 >> 8) & 0xFF) + ((p01 >> 8) & 0xFF) + ((p11 >> 8) & 0xFF) + 2) >> 2;
+            uint32_t r = (((p00 >> 16) & 0xFF) + ((p10 >> 16) & 0xFF) + ((p01 >> 16) & 0xFF) + ((p11 >> 16) & 0xFF) + 2) >> 2;
+
+            *dst++ = (uint8_t)b;
+            *dst++ = (uint8_t)g;
+            *dst++ = (uint8_t)r;
         }
     }
-
-    if (num_changed == 0) return 0;
-    *(uint16_t *)count_ptr = num_changed;
     return (uint32_t)(dst - out);
 }
 
-static void decode_tile_frame(const uint8_t *in, uint32_t in_len, uint32_t *fb, int w, int h) {
-    if (in_len < 3) return;
-    int cols = (w + TILE_SZ - 1) / TILE_SZ;
-    uint16_t num_tiles = *(const uint16_t *)(in + 1);
-    const uint8_t *src = in + 3;
+static void decode_tile_video(const uint8_t *in, uint32_t in_len, uint32_t *tile, int tw, int th) {
+    int qw = (tw + 1) / 2;
+    int qh = (th + 1) / 2;
+    const uint8_t *src = in;
     const uint8_t *end = in + in_len;
+
+    for (int qy = 0; qy < qh; qy++) {
+        int y0 = qy * 2;
+        int y1 = y0 + 1;
+        uint32_t *row0 = tile + y0 * tw;
+        uint32_t *row1 = (y1 < th) ? tile + y1 * tw : NULL;
+
+        for (int qx = 0; qx < qw; qx++) {
+            if (src + 3 > end) return;
+            uint32_t b = *src++;
+            uint32_t g = *src++;
+            uint32_t r = *src++;
+            uint32_t c = b | (g << 8) | (r << 16) | 0xFF000000u;
+
+            int x0 = qx * 2;
+            int x1 = x0 + 1;
+
+            row0[x0] = c;
+            if (x1 < tw) row0[x1] = c;
+            if (row1) {
+                row1[x0] = c;
+                if (x1 < tw) row1[x1] = c;
+            }
+        }
+    }
+}
+
+static void decode_tile_packet(const uint8_t *payload, uint32_t len, uint32_t *fb, int w, int h) {
+    if (len < 1) return;
+    int cols = (w + TILE_SZ - 1) / TILE_SZ;
+    uint8_t num_tiles = payload[0];
+    const uint8_t *src = payload + 1;
+    const uint8_t *end = payload + len;
 
     uint32_t tile[TILE_SZ * TILE_SZ];
 
-    for (int i = 0; i < num_tiles && src < end; i++) {
-        uint16_t t_idx = *(const uint16_t *)src; src += 2;
-        uint16_t c_len = *(const uint16_t *)src; src += 2;
-        if (src + c_len > end) break;
+    for (int i = 0; i < num_tiles && src + sizeof(TileItemHeader) <= end; i++) {
+        const TileItemHeader *hdr = (const TileItemHeader *)src;
+        src += sizeof(TileItemHeader);
+        if (src + hdr->data_len > end) break;
 
+        uint16_t t_idx = hdr->tile_idx;
         int tx = (t_idx % cols) * TILE_SZ;
         int ty = (t_idx / cols) * TILE_SZ;
         int tw = (tx + TILE_SZ <= w) ? TILE_SZ : (w - tx);
         int th = (ty + TILE_SZ <= h) ? TILE_SZ : (h - ty);
         int count = tw * th;
 
-        decompress_tile_data(src, c_len, tile, count);
-        src += c_len;
+        if (hdr->mode == TILE_MODE_RLE) {
+            decompress_tile_rle(src, hdr->data_len, tile, count);
+        } else if (hdr->mode == TILE_MODE_VIDEO) {
+            decode_tile_video(src, hdr->data_len, tile, tw, th);
+        }
+        src += hdr->data_len;
 
         int idx = 0;
         for (int y = 0; y < th; y++) {
@@ -454,19 +485,34 @@ static int xshm_ensure_ctx(XShmCaptureCtx *ctx, Display *dpy, Visual *vis, int d
     return 1;
 }
 
-static void send_encoded_frame(uint32_t frame_id, const uint8_t *comp, uint32_t comp_len,
-                               int w, int h, uint8_t codec) {
-    if (!g_crypto.ready || g_sock < 0) return;
-    uint16_t total_chunks = (uint16_t)((comp_len + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD);
-    if (total_chunks == 0 || total_chunks >= MAX_CHUNKS) return;
+static void micro_spin_delay(int usec) {
+    if (usec <= 0) return;
+    struct timespec start, cur;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    uint64_t target_ns = (uint64_t)usec * 1000ULL;
+    while (1) {
+        clock_gettime(CLOCK_MONOTONIC, &cur);
+        uint64_t diff_ns = ((uint64_t)cur.tv_sec - (uint64_t)start.tv_sec) * 1000000000ULL +
+                           ((uint64_t)cur.tv_nsec - (uint64_t)start.tv_nsec);
+        if (diff_ns >= target_ns) break;
+        #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+        __builtin_ia32_pause();
+        #endif
+    }
+}
+
+static void send_one_tile_packet(uint32_t frame_id, uint16_t chunk_idx, uint16_t total_chunks,
+                                 int w, int h, const uint8_t *payload, uint32_t payload_len) {
+    if (!g_crypto.ready || g_sock < 0 || payload_len == 0) return;
 
     uint8_t pkt[sizeof(PacketHeader) + CRYPTO_NONCE_LEN + CHUNK_PAYLOAD + CRYPTO_TAG_LEN];
     PacketHeader *hdr = (PacketHeader *)pkt;
     hdr->frame_id     = frame_id;
+    hdr->chunk_index  = chunk_idx;
     hdr->total_chunks = total_chunks;
     hdr->width        = (uint16_t)w;
     hdr->height       = (uint16_t)h;
-    hdr->codec        = codec;
+    hdr->codec        = CODEC_TILES;
 
     pthread_mutex_lock(&g_lock);
     int n_targets = g_num_targets;
@@ -475,32 +521,136 @@ static void send_encoded_frame(uint32_t frame_id, const uint8_t *comp, uint32_t 
     pthread_mutex_unlock(&g_lock);
     if (n_targets == 0) return;
 
-    int is_large_burst = (total_chunks > 32);
+    uint8_t *nonce  = pkt + sizeof(PacketHeader);
+    uint8_t *cipher = nonce + CRYPTO_NONCE_LEN;
+    uint8_t *tag    = cipher + payload_len;
 
-    for (uint16_t idx = 0; idx < total_chunks; idx++) {
-        uint32_t offset = (uint32_t)idx * CHUNK_PAYLOAD;
-        uint32_t sz = comp_len - offset;
-        if (sz > CHUNK_PAYLOAD) sz = CHUNK_PAYLOAD;
+    if (crypto_seal(&g_crypto, (const uint8_t *)hdr, sizeof(PacketHeader),
+                    payload, payload_len, nonce, cipher, tag) != 0) {
+        return;
+    }
 
-        hdr->chunk_index = idx;
-        uint8_t *nonce  = pkt + sizeof(PacketHeader);
-        uint8_t *cipher = nonce + CRYPTO_NONCE_LEN;
-        uint8_t *tag    = cipher + sz;
+    size_t pkt_len = sizeof(PacketHeader) + CRYPTO_NONCE_LEN + payload_len + CRYPTO_TAG_LEN;
+    for (int t = 0; t < n_targets; t++) {
+        sendto(g_sock, pkt, pkt_len, MSG_NOSIGNAL,
+               (struct sockaddr *)&targets[t], sizeof(struct sockaddr_in));
+    }
+}
 
-        if (crypto_seal(&g_crypto, (const uint8_t *)hdr, sizeof(PacketHeader),
-                        comp + offset, sz, nonce, cipher, tag) != 0) {
-            return;
+static void encode_and_send_tiles(uint32_t frame_id, const uint32_t *cur, uint32_t *prev,
+                                  int w, int h, int force_all) {
+    int cols = (w + TILE_SZ - 1) / TILE_SZ;
+    int rows = (h + TILE_SZ - 1) / TILE_SZ;
+    int total_tiles = cols * rows;
+
+    static int s_rir_cursor = 0;
+    int rir_batch = 32;
+    int rir_start = s_rir_cursor;
+    int rir_end = s_rir_cursor + rir_batch;
+    s_rir_cursor = (s_rir_cursor + rir_batch) % total_tiles;
+
+    static uint32_t pkt_offsets[MAX_CHUNKS];
+    static uint16_t pkt_lens[MAX_CHUNKS];
+    int n_pkts = 0;
+
+    uint8_t *comp_base = g_cap_comp;
+    uint32_t cur_pkt_offset = 0;
+    uint8_t *cur_pkt = comp_base;
+    cur_pkt[0] = 0;
+    uint32_t cur_pkt_len = 1;
+
+    uint32_t tile[TILE_SZ * TILE_SZ];
+    uint8_t rle_buf[TILE_SZ * TILE_SZ * 4 + 64];
+    uint8_t vid_buf[TILE_SZ * TILE_SZ * 3 + 64];
+
+    for (int t = 0; t < total_tiles; t++) {
+        int tx = (t % cols) * TILE_SZ;
+        int ty = (t / cols) * TILE_SZ;
+        int tw = (tx + TILE_SZ <= w) ? TILE_SZ : (w - tx);
+        int th = (ty + TILE_SZ <= h) ? TILE_SZ : (h - ty);
+        int count = tw * th;
+
+        int is_rir = (t >= rir_start && t < rir_end) ||
+                     (rir_end > total_tiles && t < (rir_end % total_tiles));
+        int changed = force_all || !prev || is_rir;
+
+        if (!changed) {
+            for (int y = 0; y < th; y++) {
+                const uint32_t *r_cur = cur + (ty + y) * w + tx;
+                const uint32_t *r_prv = prev + (ty + y) * w + tx;
+                if (memcmp(r_cur, r_prv, tw * 4) != 0) {
+                    changed = 1;
+                    break;
+                }
+            }
         }
 
-        size_t pkt_len = sizeof(PacketHeader) + CRYPTO_NONCE_LEN + sz + CRYPTO_TAG_LEN;
-        for (int t = 0; t < n_targets; t++) {
-            sendto(g_sock, pkt, pkt_len, MSG_NOSIGNAL,
-                   (struct sockaddr *)&targets[t], sizeof(struct sockaddr_in));
-        }
+        if (changed) {
+            int idx = 0;
+            for (int y = 0; y < th; y++) {
+                const uint32_t *r = cur + (ty + y) * w + tx;
+                for (int x = 0; x < tw; x++) {
+                    tile[idx++] = r[x];
+                }
+            }
 
-        /* Micro-pacing suave apenas para keyframes grandes: evita perda de pacotes UDP na placa de rede */
-        if (is_large_burst && (idx & 0x0F) == 0x0F) {
-            usleep(800);
+            uint8_t mode = TILE_MODE_RLE;
+            const uint8_t *data_ptr = rle_buf;
+            uint32_t c_len = compress_tile_rle(tile, count, rle_buf);
+
+            if (c_len > 768) {
+                mode = TILE_MODE_VIDEO;
+                c_len = encode_tile_video(tile, tw, th, vid_buf);
+                data_ptr = vid_buf;
+            }
+
+            uint32_t item_sz = sizeof(TileItemHeader) + c_len;
+
+            if (cur_pkt_len + item_sz > CHUNK_PAYLOAD && cur_pkt[0] > 0) {
+                pkt_offsets[n_pkts] = cur_pkt_offset;
+                pkt_lens[n_pkts] = (uint16_t)cur_pkt_len;
+                n_pkts++;
+                if (n_pkts >= MAX_CHUNKS) break;
+
+                cur_pkt_offset += cur_pkt_len;
+                cur_pkt = comp_base + cur_pkt_offset;
+                cur_pkt[0] = 0;
+                cur_pkt_len = 1;
+            }
+
+            TileItemHeader *ih = (TileItemHeader *)(cur_pkt + cur_pkt_len);
+            ih->tile_idx = (uint16_t)t;
+            ih->mode = mode;
+            ih->data_len = (uint16_t)c_len;
+            cur_pkt_len += sizeof(TileItemHeader);
+            memcpy(cur_pkt + cur_pkt_len, data_ptr, c_len);
+            cur_pkt_len += c_len;
+            cur_pkt[0]++;
+
+            if (prev) {
+                for (int y = 0; y < th; y++) {
+                    uint32_t *p_dst = prev + (ty + y) * w + tx;
+                    const uint32_t *c_src = cur + (ty + y) * w + tx;
+                    memcpy(p_dst, c_src, tw * 4);
+                }
+            }
+        }
+    }
+
+    if (cur_pkt[0] > 0 && n_pkts < MAX_CHUNKS) {
+        pkt_offsets[n_pkts] = cur_pkt_offset;
+        pkt_lens[n_pkts] = (uint16_t)cur_pkt_len;
+        n_pkts++;
+    }
+
+    if (n_pkts == 0) return;
+
+    int is_large = (n_pkts > 64);
+    for (int i = 0; i < n_pkts; i++) {
+        send_one_tile_packet(frame_id, (uint16_t)i, (uint16_t)n_pkts, w, h,
+                             comp_base + pkt_offsets[i], pkt_lens[i]);
+        if (is_large && (i & 0x0F) == 0x0F) {
+            micro_spin_delay(40);
         }
     }
 }
@@ -590,29 +740,15 @@ static void *capture_thread_proc(void *param) {
                 cb(0, g_cap_bgra, cur_w, cur_h, cur_w * 4);
             }
 
-            uint64_t now_tick = get_tick_ms();
-            static uint64_t last_keyframe_ts = 0;
             static int s_prev_w = 0, s_prev_h = 0;
-            int is_keyframe = (!g_prev_bgra || cur_w != s_prev_w || cur_h != s_prev_h ||
-                               (now_tick - last_keyframe_ts) >= 2000 || frame_id == 1);
-
-            uint32_t comp_len = encode_tile_frame(
-                (const uint32_t *)g_cap_bgra,
-                is_keyframe ? NULL : (const uint32_t *)g_prev_bgra,
-                cur_w, cur_h, g_cap_comp, is_keyframe
-            );
-
-            if (comp_len > 0) {
-                if (is_keyframe) {
-                    last_keyframe_ts = now_tick;
-                    s_prev_w = cur_w;
-                    s_prev_h = cur_h;
-                }
-                if (g_prev_bgra) {
-                    memcpy(g_prev_bgra, g_cap_bgra, (size_t)cur_w * (size_t)cur_h * 4);
-                }
-                send_encoded_frame(frame_id++, g_cap_comp, comp_len, cur_w, cur_h, CODEC_RLE);
+            int force_all = (frame_id <= 2 || cur_w != s_prev_w || cur_h != s_prev_h);
+            if (force_all) {
+                s_prev_w = cur_w;
+                s_prev_h = cur_h;
             }
+
+            encode_and_send_tiles(frame_id++, (const uint32_t *)g_cap_bgra,
+                                  (uint32_t *)g_prev_bgra, cur_w, cur_h, force_all);
         }
 
         uint64_t elapsed = get_tick_ms() - t_start;
@@ -644,6 +780,9 @@ static int find_stream_slot(uint32_t sender_id, RxStream **out_stream) {
     s->sender_id              = sender_id;
     s->last_rx                = now;
     s->last_rendered_frame_id = 0;
+    s->last_render_ts         = 0;
+    s->width                  = 0;
+    s->height                 = 0;
     if (s->bgra_buf) memset(s->bgra_buf, 0, MAX_RAW_BYTES);
     for (int k = 0; k < NUM_FRAME_SLOTS; k++) {
         s->slots[k].frame_id        = 0;
@@ -734,6 +873,30 @@ static void *rx_thread_proc(void *param) {
         int stream_id = find_stream_slot(sid, &s);
         s->last_rx = now;
 
+        /* Decodificação imediata de tiles autossuficientes sem descartar frames */
+        if (hdr->codec == CODEC_TILES || hdr->codec == CODEC_RLE) {
+            if (s->width != hdr->width || s->height != hdr->height) {
+                s->width = hdr->width;
+                s->height = hdr->height;
+                memset(s->bgra_buf, 0, (size_t)hdr->width * (size_t)hdr->height * 4);
+            }
+
+            decode_tile_packet(plain_chunk, cipher_len, (uint32_t *)s->bgra_buf, hdr->width, hdr->height);
+
+            int is_last = (hdr->total_chunks > 0 && hdr->chunk_index + 1 >= hdr->total_chunks);
+            int is_new_frame = (hdr->frame_id > s->last_rendered_frame_id);
+
+            if (is_last || (is_new_frame && (now - s->last_render_ts) >= 14) || (now - s->last_render_ts) >= 33) {
+                s->last_rendered_frame_id = hdr->frame_id;
+                s->last_render_ts = now;
+                FrameCallback cb = g_callback;
+                if (cb) {
+                    cb(stream_id, s->bgra_buf, hdr->width, hdr->height, hdr->width * 4);
+                }
+            }
+            continue;
+        }
+
         int slot_idx = (int)(hdr->frame_id % NUM_FRAME_SLOTS);
         FrameSlot *slot = &s->slots[slot_idx];
 
@@ -823,13 +986,16 @@ EXPORT int video_init(int local_udp_port) {
     }
 
     g_cap_bgra = (uint8_t *)malloc(MAX_RAW_BYTES);
+    g_prev_bgra = (uint8_t *)malloc(MAX_RAW_BYTES);
     g_cap_comp = (uint8_t *)malloc(MAX_COMP_BYTES);
-    if (!g_cap_bgra || !g_cap_comp) {
+    if (!g_cap_bgra || !g_prev_bgra || !g_cap_comp) {
         free(g_cap_bgra); g_cap_bgra = NULL;
+        free(g_prev_bgra); g_prev_bgra = NULL;
         free(g_cap_comp); g_cap_comp = NULL;
         close(g_sock); g_sock = -1;
         return -4;
     }
+    memset(g_prev_bgra, 0, MAX_RAW_BYTES);
 
     memset(g_rx_streams, 0, sizeof(g_rx_streams));
     for (int i = 0; i < MAX_STREAMS; i++) {
@@ -877,7 +1043,7 @@ EXPORT int video_start_capture_ex(int max_height, int target_fps, int bitrate, u
 
 EXPORT int video_start_capture(int target_fps, int quality) {
     int br = (quality >= 85) ? 8000000 : 4000000;
-    return video_start_capture_ex(720, target_fps, br, 0, 0);
+    return video_start_capture_ex(1080, target_fps, br, 0, 0);
 }
 
 EXPORT void video_stop_capture(void) {
@@ -948,6 +1114,7 @@ EXPORT void video_cleanup(void) {
     }
 
     free(g_cap_bgra); g_cap_bgra = NULL;
+    free(g_prev_bgra); g_prev_bgra = NULL;
     free(g_cap_comp); g_cap_comp = NULL;
     for (int i = 0; i < MAX_STREAMS; i++) {
         free(g_rx_streams[i].bgra_buf); g_rx_streams[i].bgra_buf = NULL;

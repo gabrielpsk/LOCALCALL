@@ -1,5 +1,5 @@
 """Área de visualização de compartilhamento de tela em grade adaptativa com modo Tela Cheia."""
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QRect, Qt
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter
 from PyQt6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
                              QPushButton, QSizePolicy, QVBoxLayout, QWidget)
@@ -17,14 +17,16 @@ def _paint_video_surface(widget: QWidget, image: QImage | None, title: str, is_f
     if image and not image.isNull():
         iw, ih = image.width(), image.height()
         res_badge = f"  [{iw}x{ih}]"
-        scaled = image.scaled(
-            rect.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        x = (rect.width() - scaled.width()) // 2
-        y = (rect.height() - scaled.height()) // 2
-        painter.drawImage(x, y, scaled)
+        rw, rh = rect.width(), rect.height()
+        if rw > 0 and rh > 0 and iw > 0 and ih > 0:
+            scale = min(rw / iw, rh / ih)
+            tw = max(1, int(iw * scale))
+            th = max(1, int(ih * scale))
+            tx = rect.x() + (rw - tw) // 2
+            ty = rect.y() + (rh - th) // 2
+            target_rect = QRect(tx, ty, tw, th)
+            # Renderiza o QImage diretamente no target_rect com interpolação suave High-DPI nativa
+            painter.drawImage(target_rect, image)
     else:
         painter.setPen(QColor("#a1a1aa"))
         painter.setFont(QFont("Segoe UI", 10))

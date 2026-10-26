@@ -46,12 +46,12 @@ class VideoBridge(QObject):
         self.capturing = False
         # Configuração selecionada no ScreenShareDialog
         self.capture_config = {
-            "max_height": 720,
+            "max_height": 1080,
             "fps": 60,
-            "bitrate": 6_000_000,
+            "bitrate": 8_000_000,
             "hwnd": 0,
             "monitor_index": 0,
-            "label": "Tela 1 (720p 60 FPS)",
+            "label": "Tela 1 (1080p 60 FPS)",
         }
         self._load_dll()
 
@@ -117,9 +117,9 @@ class VideoBridge(QObject):
 
     def configure_capture(
         self,
-        max_height: int = 720,
+        max_height: int = 1080,
         fps: int = 60,
-        bitrate: int = 6_000_000,
+        bitrate: int = 8_000_000,
         hwnd: int = 0,
         monitor_index: int = 0,
         label: str = "",

@@ -6,11 +6,12 @@ import time
 
 SOURCE_DIR = r"c:\Users\gabri\OneDrive\Área de Trabalho\App de call"
 OUTPUT_DIR = r"C:\Users\gabri\OneDrive\Área de Trabalho\SITE APP CALL\downloads"
+VERSION = "1.0.6"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 1. Gerar localcall-v1.0.0-linux-x86_64.tar.gz
-tar_path = os.path.join(OUTPUT_DIR, "localcall-v1.0.0-linux-x86_64.tar.gz")
+# 1. Gerar localcall-v1.0.6-linux-x86_64.tar.gz
+tar_path = os.path.join(OUTPUT_DIR, f"localcall-v{VERSION}-linux-x86_64.tar.gz")
 print(f"Gerando {tar_path}...")
 
 def get_all_source_files():
@@ -42,7 +43,7 @@ with tarfile.open(tar_path, "w:gz") as tar:
     for rel_src, rel_dst in files_to_include:
         full_src = os.path.join(SOURCE_DIR, rel_src)
         if os.path.exists(full_src):
-            info = tar.gettarinfo(full_src, arcname=f"localcall-v1.0.0/{rel_dst}")
+            info = tar.gettarinfo(full_src, arcname=f"localcall-v{VERSION}/{rel_dst}")
             # Permissões unix
             if rel_dst.endswith(".sh") or rel_dst == "main.py":
                 info.mode = 0o755
@@ -56,7 +57,7 @@ with tarfile.open(tar_path, "w:gz") as tar:
             print(f"Aviso: arquivo não encontrado {full_src}")
 
     if os.path.exists(install_sh_src):
-        info = tar.gettarinfo(install_sh_src, arcname="localcall-v1.0.0/install.sh")
+        info = tar.gettarinfo(install_sh_src, arcname=f"localcall-v{VERSION}/install.sh")
         info.mode = 0o755
         info.uname = "root"
         info.gname = "root"
@@ -65,21 +66,21 @@ with tarfile.open(tar_path, "w:gz") as tar:
 
 print(f"Tarball gerado: {os.path.getsize(tar_path)} bytes")
 
-# 2. Gerar localcall_1.0.0_amd64.deb
+# 2. Gerar localcall_1.0.6_amd64.deb
 # O formato .deb é um arquivo ar no padrão GNU:
 # !<arch>\n
 # debian-binary
 # control.tar.gz
 # data.tar.gz
-deb_path = os.path.join(OUTPUT_DIR, "localcall_1.0.0_amd64.deb")
+deb_path = os.path.join(OUTPUT_DIR, f"localcall_{VERSION}_amd64.deb")
 print(f"Gerando pacote Debian {deb_path}...")
 
 # 2.1 debian-binary
 debian_binary_bytes = b"2.0\n"
 
 # 2.2 control.tar.gz
-control_content = """Package: localcall
-Version: 1.0.0
+control_content = f"""Package: localcall
+Version: {VERSION}
 Section: net
 Priority: optional
 Architecture: amd64

@@ -208,8 +208,8 @@ class ScreenShareDialog(QDialog):
         qual_grid.addWidget(lbl_qual, 0, 0, 1, 3)
 
         self.res_combo = QComboBox()
-        self.res_combo.addItem("720p (HD)", 720)
         self.res_combo.addItem("1080p (Full HD)", 1080)
+        self.res_combo.addItem("720p (HD)", 720)
         self.res_combo.currentIndexChanged.connect(self._update_bitrate_label)
 
         self.fps_combo = QComboBox()
@@ -292,7 +292,7 @@ class ScreenShareDialog(QDialog):
             self.window_list.setCurrentRow(0)
 
     def _compute_bitrate(self) -> int:
-        res = int(self.res_combo.currentData() or 720)
+        res = int(self.res_combo.currentData() or 1080)
         fps = int(self.fps_combo.currentData() or 60)
         if res >= 1080:
             return 8_000_000 if fps >= 60 else 5_000_000
@@ -308,7 +308,7 @@ class ScreenShareDialog(QDialog):
         self.accept()
 
     def values(self) -> dict:
-        max_h = int(self.res_combo.currentData() or 720)
+        max_h = int(self.res_combo.currentData() or 1080)
         fps = int(self.fps_combo.currentData() or 60)
         bitrate = self._compute_bitrate()
         share_audio = bool(self.share_audio_chk.isChecked())
